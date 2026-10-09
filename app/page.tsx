@@ -85,7 +85,16 @@ export interface LevisReceipt {
     expiring: { points: number; on: string };
   };
   rewards: { feedback: number; refer: number; profile: number };
-  contact: { tollFree: string; hours: string; email: string };
+  contact: {
+    tollFree: string;
+    hours: string;
+    email: string;
+    /** Number opened by "Talk to us" */
+    callTo: string;
+    /** Address opened by "Write to us" */
+    writeTo: string;
+  };
+  referral: { code: string; signupUrl: string };
   terms: { intro: string; list: string[]; note: string };
   history: { invoiceNo: string; date: string; store: string; amount: number; current?: boolean }[];
 }
@@ -158,6 +167,9 @@ function seeded(seed: string): () => number {
   };
 }
 
+const buildReferralMessage = (code: string, url: string, points: number): string =>
+  `Hey, Use my referral code *${code}* and register for Levi's Redtab member program to enjoy exclusive benefits like earning points on every transaction, birthday surprises, special offers & more! Sign up here: ${url} We both earn ${points} reward points once you register successfully. Let's shop together! *T&C apply.`;
+
 /* ----------------------------------------------------------------------------------
  * Sample data (shape mirrors the current receipt). Item 1 is the real line from the
  * current receipt; item codes / HSN / sizes for items 2–3 are SAMPLE values.
@@ -193,7 +205,14 @@ export const sampleLevisReceipt: LevisReceipt = {
   ],
   points: { available: 1951, earned: 917, redeemed: 0, expiring: { points: 1034, on: "12 Jan 2027" } },
   rewards: { feedback: 50, refer: 100, profile: 50 },
-  contact: { tollFree: "1800 1020 501", hours: "Mon-Fri, 10AM to 6 PM", email: "feedback@levi.com" },
+  contact: {
+    tollFree: "1800 1020 501",
+    hours: "Mon-Fri, 10AM to 6 PM",
+    email: "feedback@levi.com",
+    callTo: "+919620921294",
+    writeTo: "sagar.p@proenx.com",
+  },
+  referral: { code: "LEV12WU0SE", signupUrl: "https://levisredtabmemberin.erlpaas.com/" },
   terms: {
     intro:
       "We hope you love your Levi's® product. In case you are not satisfied, you may present the sale invoice and exchange the product within 14 days from the date of purchase*. Subject to the terms and conditions listed below, products can only be exchanged and under no circumstances can any amount be refunded.",
@@ -839,7 +858,7 @@ export default function LevisReceiptV1({
   onSubmitFeedback,
   onRefer,
 }: LevisReceiptProps) {
-  const [openItem, setOpenItem] = useState(0);
+  const [openItem, setOpenItem] = useState(-1);
   const [modal, setModal] = useState<ModalId>(null);
   const [termsOpen, setTermsOpen] = useState(false);
   const [email, setEmail] = useState("");
@@ -847,7 +866,8 @@ export default function LevisReceiptV1({
   const closeModal = useCallback(() => setModal(null), []);
   const termsId = useId();
 
-  const { store, rewards, contact, terms } = data;
+  const { store, rewards, contact, terms, referral } = data;
+  const whatsappHref = `https://wa.me/?text=${encodeURIComponent(buildReferralMessage(referral.code, referral.signupUrl, rewards.refer))}`;
 
   const taxRows = useMemo(() => {
     const by = new Map<number, { rate: number; base: number; sgst: number; cgst: number }>();
@@ -1022,9 +1042,11 @@ export default function LevisReceiptV1({
           {/* ---------- Feedback + refer ---------- */}
           <FeedbackCard name={data.customer.firstName} points={rewards.feedback} onSubmit={onSubmitFeedback} />
 
-          <button
-            type="button"
-            onClick={onRefer}
+          <a
+            href={whatsappHref}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={() => onRefer?.()}
             className={`flex w-full items-center gap-3 rounded-2xl border border-[var(--lv-line)] p-4 text-left transition-colors hover:border-[var(--lv-red)] motion-reduce:transition-none ${focusRing}`}
           >
             <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[#C41230]/10 text-[var(--lv-red)]">
@@ -1036,7 +1058,7 @@ export default function LevisReceiptV1({
                 Refer a friend and both of you earn {rewards.refer} RedTab points
               </span>
             </span>
-          </button>
+          </a>
 
           {/* ---------- RedTab ---------- */}
           <RedTabSection data={data} onUpdateProfile={onUpdateProfile} />
@@ -1046,14 +1068,14 @@ export default function LevisReceiptV1({
             <h2 className={`${display.className} text-xl font-semibold`}>Reach out to us</h2>
             <div className="mt-3 grid grid-cols-2 gap-3">
               <a
-                href={`tel:${contact.tollFree.replace(/\s/g, "")}`}
+                href={`tel:${contact.callTo}`}
                 className={`flex items-center justify-center gap-2 rounded-xl border border-[var(--lv-black)] py-3 text-sm font-semibold transition-colors hover:border-[var(--lv-red)] hover:bg-[var(--lv-red)] hover:text-white motion-reduce:transition-none ${focusRing}`}
               >
                 <Icon name="phone" className="h-[18px] w-[18px]" />
                 Talk to us
               </a>
               <a
-                href={`mailto:${contact.email}`}
+                href={`mailto:${contact.writeTo}`}
                 className={`flex items-center justify-center gap-2 rounded-xl border border-[var(--lv-black)] py-3 text-sm font-semibold transition-colors hover:border-[var(--lv-red)] hover:bg-[var(--lv-red)] hover:text-white motion-reduce:transition-none ${focusRing}`}
               >
                 <Icon name="mail" className="h-[18px] w-[18px]" />
@@ -1070,7 +1092,7 @@ export default function LevisReceiptV1({
                 aria-expanded={termsOpen}
                 aria-controls={termsId}
                 onClick={() => setTermsOpen((o) => !o)}
-                className={`${display.className} flex w-full items-center justify-between py-4 text-xl font-semibold ${focusRing}`}
+                className={`${display.className} flex w-full items-center justify-between py-4 text-xl font-semibold transition-colors motion-reduce:transition-none ${focusRing} ${termsOpen ? "text-[var(--lv-red)]" : ""}`}
               >
                 Terms and conditions
                 <Icon name="chevron" className={`h-5 w-5 transition-transform duration-300 motion-reduce:transition-none ${termsOpen ? "rotate-180" : ""}`} />
