@@ -1,14 +1,17 @@
 "use client";
 
 /**
- * Levi's x RDEP — Receipt redesign, Option 1: "Red Tab"
+ * Levi's x RDEP — Receipt redesign, Option 1
  *
- * Concept: the receipt hangs off a dark indigo header the way the red tab hangs off a
- * back pocket. Everything is held in a stitched "pocket" outline (tan dashed borders).
- * Content is exactly what the current Levi's receipt already has — nothing new.
+ * Layout: logo bar -> red "ticket" hero (greeting, QR, invoice details) -> store ->
+ * compact item list with inline details -> black net-total bar -> payment ->
+ * feedback (stars + what you liked) -> refer -> RedTab segmented tabs -> reach out ->
+ * terms (collapsible) -> barcode + rdep logo.
  *
- * Stack: Next.js (app router) + Tailwind. No extra dependencies (icons are inline SVG).
- * Fonts: Barlow + Barlow Condensed via next/font/google.
+ * Colours: Levi's red, black and white only (plus neutral greys for hairlines and muted text).
+ *
+ * Needs (in /public/images): levis-logo.png, rdep-logo.png
+ * Stack: Next.js (app router) + Tailwind. No other dependencies.
  *
  * Usage:  app/levis-receipt/page.tsx
  *   import LevisReceiptV1 from "@/components/LevisReceiptV1";
@@ -24,21 +27,23 @@ import {
   useState,
   type ChangeEvent,
   type CSSProperties,
+  type FormEvent,
   type ReactNode,
 } from "react";
+import Image from "next/image";
 import { Barlow, Barlow_Condensed } from "next/font/google";
 
-const body = Barlow({ subsets: ["latin"], weight: ["400", "500", "600"], display: "swap" });
+const body = Barlow({ subsets: ["latin"], weight: ["400", "500", "600", "700"], display: "swap" });
 const display = Barlow_Condensed({ subsets: ["latin"], weight: ["500", "600", "700"], display: "swap" });
 
-/* Brand tokens. Solid colours use CSS vars; where an alpha is needed the hex is inlined. */
+/* Brand tokens: red, black, white + neutral greys. Alpha tints inline the hex. */
 const theme = {
-  "--lv-red": "#C41230", // Levi's red tab
-  "--lv-ink": "#0F1A2B", // raw indigo denim
-  "--lv-denim": "#2B4568", // washed denim
-  "--lv-slate": "#5B6678", // secondary text
-  "--lv-wash": "#F2F4F8", // light wash
-  "--lv-stitch": "#D4A24C", // contrast stitching
+  "--lv-red": "#C41230",
+  "--lv-red-dark": "#A50F28",
+  "--lv-black": "#111111",
+  "--lv-gray": "#6B6B6B",
+  "--lv-line": "#E4E4E4",
+  "--lv-wash": "#F5F5F5",
 } as CSSProperties;
 
 /* ------------------------------- types ------------------------------------------- */
@@ -93,18 +98,23 @@ export interface ProfileForm {
   email: string;
 }
 
+export interface FeedbackValues {
+  rating: number;
+  liked: string[];
+}
+
 export interface LevisReceiptProps {
   data?: LevisReceipt;
-  /** Real QR image URL (placeholder is drawn if omitted) */
+  /** Real QR image URL (a placeholder is drawn if omitted) */
   qrSrc?: string;
-  /** Real barcode image URL (placeholder is drawn if omitted) */
+  /** Real barcode image URL (a placeholder is drawn if omitted) */
   barcodeSrc?: string;
-  /** White Levi's wordmark for the red tab (text wordmark if omitted) */
   logoSrc?: string;
+  rdepLogoSrc?: string;
   onDownloadPdf?: () => void;
   onSendEmail?: (email: string) => void;
   onUpdateProfile?: (values: ProfileForm) => void;
-  onFeedback?: () => void;
+  onSubmitFeedback?: (values: FeedbackValues) => void;
   onRefer?: () => void;
 }
 
@@ -114,22 +124,47 @@ type IconName =
 type TabId = "points" | "profile" | "coupon";
 type ModalId = "history" | "email" | "tax" | null;
 
+/* ------------------------------- helpers ----------------------------------------- */
+const inr = (n: number): string => n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const trim = (n: number): string => String(Number(n.toFixed(2)));
+const round2 = (n: number): number => Math.round(n * 100) / 100;
+
+// Apparel GST slab: 5% up to ₹2,500 per piece, 18% above (matches the figures on the current receipt)
+const slabFor = (item: ReceiptItem): number => (item.net / item.qty > 2500 ? 18 : 5);
+
+function derive(item: ReceiptItem) {
+  const rate = slabFor(item);
+  const base = item.net / (1 + rate / 100);
+  const half = rate / 2;
+  const tax = (base * half) / 100;
+  const gross = item.mrp * item.qty;
+  const disc = gross - item.net;
+  return { rate, base, half, tax, discountPct: (disc / gross) * 100, discountAmt: disc };
+}
+
+function seeded(seed: string): () => number {
+  let s = 2166136261;
+  for (let i = 0; i < seed.length; i++) {
+    s ^= seed.charCodeAt(i);
+    s = Math.imul(s, 16777619);
+  }
+  s = s || 1;
+  return () => {
+    s ^= s << 13;
+    s ^= s >>> 17;
+    s ^= s << 5;
+    return ((s >>> 0) % 100000) / 100000;
+  };
+}
+
 /* ----------------------------------------------------------------------------------
- * Sample data (shape mirrors the current receipt)
- * Items 2–11: item code / HSN / size are SAMPLE values; tax + discount are derived.
+ * Sample data (shape mirrors the current receipt). Item 1 is the real line from the
+ * current receipt; item codes / HSN / sizes for items 2–3 are SAMPLE values.
  * -------------------------------------------------------------------------------- */
 const ITEMS: ReceiptItem[] = [
   { name: "BLR_MT_STANDARD FIT TEE SP VARSITY BRAND", qty: 1, mrp: 2199, net: 1889.97, code: "A797302560M", hsn: "61091000", size: "M" },
   { name: "BLR MB 511 SLIM ALOKI", qty: 1, mrp: 3789, net: 3256.52, code: "A112340071", hsn: "62034200", size: "32", inseam: "32" },
   { name: "BNG MT CL1PKT_TRIM SHRT L/S CLASSIC REGU", qty: 1, mrp: 3299, net: 2835.38, code: "A558120044", hsn: "62052000", size: "L" },
-  { name: "BLR MT RL NOAH SLIM LADD IRISH CREAM+GRE", qty: 1, mrp: 4599, net: 3952.69, code: "A640210093", hsn: "62052000", size: "L" },
-  { name: "BNG MB 527 NEW 1 ICY-01", qty: 1, mrp: 4199, net: 3608.9, code: "A223450018", hsn: "62034200", size: "32", inseam: "32" },
-  { name: "BLRMB_512CLASSIC5PKT FRESHNESS", qty: 1, mrp: 4799, net: 4124.59, code: "A334560027", hsn: "62034200", size: "34", inseam: "32" },
-  { name: "BLR MB WINIX 517 BABBLE", qty: 1, mrp: 4199, net: 3608.9, code: "A445670036", hsn: "62034200", size: "32", inseam: "34" },
-  { name: "MT BLR SELF FLD PLK POLO SPRING CAMOU A", qty: 1, mrp: 2599, net: 2233.76, code: "A771230052", hsn: "61051000", size: "M" },
-  { name: "BLR_MT_STANDARD FIT TEE SP VARSITY BRAND", qty: 1, mrp: 2199, net: 1889.97, code: "A797302560L", hsn: "61091000", size: "L" },
-  { name: "BLR_MT_STANDARD FIT TEE THE ORIGINAL OD", qty: 1, mrp: 1699, net: 1460.24, code: "A882340065", hsn: "61091000", size: "M" },
-  { name: "MT BLR SET-ON PLKT POLO COOLTEK POLO VIN", qty: 1, mrp: 1999, net: 1718.08, code: "A993450071", hsn: "61051000", size: "M" },
 ];
 
 export const sampleLevisReceipt: LevisReceipt = {
@@ -148,12 +183,12 @@ export const sampleLevisReceipt: LevisReceipt = {
   },
   customer: { firstName: "Rashad", mobile: "7250230751" },
   items: ITEMS,
-  subTotal: 26878.8,
-  netTotal: 30579,
-  pieces: 11,
+  subTotal: round2(ITEMS.reduce((s, i) => s + derive(i).base, 0)),
+  netTotal: round2(ITEMS.reduce((s, i) => s + i.net, 0)),
+  pieces: ITEMS.reduce((s, i) => s + i.qty, 0),
   payments: [
-    { mode: "CASH", amount: 579 },
-    { mode: "QCLVR", amount: 10000 },
+    { mode: "CASH", amount: 1981.87 },
+    { mode: "QCLVR", amount: 6000 },
   ],
   points: { available: 1951, earned: 917, redeemed: 0, expiring: { points: 1034, on: "12 Jan 2027" } },
   rewards: { feedback: 50, refer: 100, profile: 50 },
@@ -177,54 +212,11 @@ export const sampleLevisReceipt: LevisReceipt = {
   },
   // SAMPLE rows for the transaction history popup — replace with the real API response
   history: [
-    { invoiceNo: "7019", date: "24-05-2026", store: "Durgapur - Junction Mall", amount: 30579, current: true },
+    { invoiceNo: "7019", date: "24-05-2026", store: "Durgapur - Junction Mall", amount: 7981.87, current: true },
     { invoiceNo: "6488", date: "11-02-2026", store: "Durgapur - Junction Mall", amount: 4299 },
     { invoiceNo: "5921", date: "29-12-2025", store: "Kolkata - Quest Mall", amount: 7897 },
   ],
 };
-
-/* ------------------------------- helpers ----------------------------------------- */
-const inr = (n: number): string => n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const trim = (n: number): string => String(Number(n.toFixed(2)));
-
-// Apparel GST slab: 5% up to ₹2,500 per piece, 18% above (matches the figures on the current receipt)
-const slabFor = (item: ReceiptItem): number => (item.net / item.qty > 2500 ? 18 : 5);
-
-function derive(item: ReceiptItem) {
-  const rate = slabFor(item);
-  const base = item.net / (1 + rate / 100);
-  const half = rate / 2;
-  const tax = (base * half) / 100;
-  const gross = item.mrp * item.qty;
-  const disc = gross - item.net;
-  return {
-    rate,
-    base,
-    discountPct: (disc / gross) * 100,
-    discountAmt: disc,
-    sgstPct: half,
-    sgstBase: base,
-    sgstAmt: tax,
-    cgstPct: half,
-    cgstBase: base,
-    cgstAmt: tax,
-  };
-}
-
-function seeded(seed: string): () => number {
-  let s = 2166136261;
-  for (let i = 0; i < seed.length; i++) {
-    s ^= seed.charCodeAt(i);
-    s = Math.imul(s, 16777619);
-  }
-  s = s || 1;
-  return () => {
-    s ^= s << 13;
-    s ^= s >>> 17;
-    s ^= s << 5;
-    return ((s >>> 0) % 100000) / 100000;
-  };
-}
 
 /* -------------------------------- icons ------------------------------------------ */
 const PATHS: Record<IconName, ReactNode> = {
@@ -299,11 +291,11 @@ const PATHS: Record<IconName, ReactNode> = {
   check: <path d="m5 12 5 5 9-10" />,
 };
 
-function Icon({ name, className = "h-5 w-5" }: { name: IconName; className?: string }) {
+function Icon({ name, className = "h-5 w-5", filled = false }: { name: IconName; className?: string; filled?: boolean }) {
   return (
     <svg
       viewBox="0 0 24 24"
-      fill="none"
+      fill={filled ? "currentColor" : "none"}
       stroke="currentColor"
       strokeWidth="1.8"
       strokeLinecap="round"
@@ -334,7 +326,7 @@ function PlaceholderQR({ seed }: { seed: string }) {
     </g>
   );
   return (
-    <svg viewBox={`-1 -1 ${N + 2} ${N + 2}`} fill="#0F1A2B" shapeRendering="crispEdges" role="img" aria-label="Receipt QR code" className="h-full w-full">
+    <svg viewBox={`-1 -1 ${N + 2} ${N + 2}`} fill="#111111" shapeRendering="crispEdges" role="img" aria-label="Receipt QR code" className="h-full w-full">
       <rect x="-1" y="-1" width={N + 2} height={N + 2} fill="#fff" />
       {cells.map(([x, y]) => (
         <rect key={`${x}-${y}`} x={x} y={y} width="1" height="1" />
@@ -359,7 +351,7 @@ function PlaceholderBarcode({ seed }: { seed: string }) {
     return out;
   }, [seed]);
   return (
-    <svg viewBox="0 0 244 56" fill="#0F1A2B" shapeRendering="crispEdges" role="img" aria-label="Receipt barcode" className="h-14 w-full max-w-xs">
+    <svg viewBox="0 0 244 56" fill="#111111" shapeRendering="crispEdges" role="img" aria-label="Receipt barcode" className="h-14 w-full max-w-xs">
       {bars.map(([x, w]) => (
         <rect key={x} x={x} y="0" width={w} height="56" />
       ))}
@@ -367,7 +359,11 @@ function PlaceholderBarcode({ seed }: { seed: string }) {
   );
 }
 
-/* --------------------------------- modal ----------------------------------------- */
+/* --------------------------------- shared ---------------------------------------- */
+const focusRing = "focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--lv-red)]";
+const inputCls = `w-full rounded-xl border border-[var(--lv-line)] bg-white px-3 py-2.5 text-sm outline-none transition-colors focus:border-[var(--lv-red)] focus:ring-2 focus:ring-[#C41230]/20`;
+const primaryBtn = `w-full rounded-xl bg-[var(--lv-red)] py-3 text-sm font-semibold text-white transition-colors hover:bg-[var(--lv-red-dark)] motion-reduce:transition-none ${focusRing}`;
+
 function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
   const panelRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
@@ -390,7 +386,7 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-[#0F1A2B]/60 sm:items-center sm:p-4"
+      className="fixed inset-0 z-50 flex items-end justify-center bg-[#111111]/60 sm:items-center sm:p-4"
       onMouseDown={(e) => e.target === e.currentTarget && onClose()}
     >
       <div
@@ -409,7 +405,7 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="grid h-9 w-9 place-items-center rounded-full bg-[var(--lv-wash)] text-[var(--lv-ink)] hover:bg-[#E3E7EF] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--lv-red)]"
+            className={`grid h-9 w-9 place-items-center rounded-full bg-[var(--lv-wash)] hover:bg-[var(--lv-line)] ${focusRing}`}
           >
             <Icon name="close" className="h-4 w-4" />
           </button>
@@ -420,19 +416,26 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
   );
 }
 
-/* ------------------------------ item row ----------------------------------------- */
-const ROW_GRID = "grid grid-cols-[minmax(0,1fr)_1.75rem_3.75rem_5rem] items-start gap-x-2";
-
-function DetailGroup({ rows }: { rows: [string, string][] }) {
+/** Height-animated disclosure body (no layout jump, respects reduced motion). */
+function Collapse({ open, id, children }: { open: boolean; id: string; children: ReactNode }) {
   return (
-    <dl className="rounded-lg bg-[var(--lv-wash)] px-3 py-2">
-      {rows.map(([label, value]) => (
-        <div key={label} className="flex justify-between gap-4 py-0.5">
-          <dt className="text-[var(--lv-slate)]">{label}</dt>
-          <dd className="font-medium tabular-nums">{value}</dd>
-        </div>
-      ))}
-    </dl>
+    <div
+      id={id}
+      aria-hidden={!open}
+      className={`grid transition-[grid-template-rows] duration-300 motion-reduce:transition-none ${open ? "grid-rows-[1fr]" : "grid-rows-[0fr]"}`}
+    >
+      <div className="overflow-hidden">{children}</div>
+    </div>
+  );
+}
+
+/* ------------------------------ item row ----------------------------------------- */
+function Spec({ label, value, accent = false }: { label: string; value: string; accent?: boolean }) {
+  return (
+    <span className="inline-flex items-baseline gap-1.5 rounded-md border border-[var(--lv-line)] px-2 py-1 text-xs">
+      <span className="text-[var(--lv-gray)]">{label}</span>
+      <span className={`font-semibold tabular-nums ${accent ? "text-[var(--lv-red)]" : ""}`}>{value}</span>
+    </span>
   );
 }
 
@@ -440,57 +443,200 @@ function ItemRow({ item, open, onToggle }: { item: ReceiptItem; open: boolean; o
   const d = useMemo(() => derive(item), [item]);
   const panelId = useId();
   return (
-    <li className="border-b border-dashed border-[#D4A24C]/70 last:border-b-0">
+    <li className="py-3">
       <button
         type="button"
         onClick={onToggle}
         aria-expanded={open}
         aria-controls={panelId}
-        className={`${ROW_GRID} w-full rounded-md py-3 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--lv-red)]`}
+        className={`flex w-full items-start gap-3 rounded-lg text-left ${focusRing}`}
       >
-        <span className="flex min-w-0 items-start gap-1.5">
-          <Icon
-            name="chevron"
-            className={`mt-0.5 h-4 w-4 shrink-0 text-[var(--lv-red)] transition-transform duration-300 motion-reduce:transition-none ${open ? "rotate-180" : ""}`}
-          />
-          <span className="text-[13px] font-medium leading-snug">{item.name}</span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-sm font-semibold leading-snug">{item.name}</span>
+          <span className="mt-1 flex gap-4 text-xs text-[var(--lv-gray)]">
+            <span>Qty {item.qty}</span>
+            <span>MRP {item.mrp.toLocaleString("en-IN")}</span>
+          </span>
         </span>
-        <span className="text-center text-sm tabular-nums">{item.qty}</span>
-        <span className="text-right text-sm tabular-nums text-[var(--lv-slate)]">{item.mrp.toLocaleString("en-IN")}</span>
-        <span className="text-right text-sm font-semibold tabular-nums">{inr(item.net)}</span>
+        <span className="shrink-0 text-right">
+          <span className="block text-sm font-bold tabular-nums">{inr(item.net)}</span>
+          <span className="mt-1 inline-flex items-center gap-0.5 text-xs font-semibold text-[var(--lv-red)]">
+            Details
+            <Icon
+              name="chevron"
+              className={`h-3.5 w-3.5 transition-transform duration-300 motion-reduce:transition-none ${open ? "rotate-180" : ""}`}
+            />
+          </span>
+        </span>
       </button>
 
-      <div
-        id={panelId}
-        aria-hidden={!open}
-        className={`grid transition-[grid-template-rows] duration-300 motion-reduce:transition-none ${open ? "grid-rows-[1fr]" : "grid-rows-[0fr]"}`}
-      >
-        <div className="overflow-hidden">
-          <div className="space-y-2 pb-3 text-[13px]">
-            <DetailGroup
-              rows={[
-                ["Item code", item.code],
-                ["HSN", item.hsn],
-                ["UoM", "Pcs"],
-                ["Size", item.size],
-                ["Inseam", item.inseam ?? "-"],
-              ]}
-            />
-            <DetailGroup rows={[["Discount %", trim(d.discountPct)], ["Discount amount", trim(d.discountAmt)]]} />
-            <DetailGroup
-              rows={[
-                ["SGST %", trim(d.sgstPct)],
-                ["SGST base amount", trim(d.sgstBase)],
-                ["SGST amount", trim(d.sgstAmt)],
-                ["CGST %", trim(d.cgstPct)],
-                ["CGST base amount", trim(d.cgstBase)],
-                ["CGST amount", trim(d.cgstAmt)],
-              ]}
-            />
+      <Collapse open={open} id={panelId}>
+        <div className="mt-3 border-l-2 border-[var(--lv-red)] pl-3">
+          <div className="flex flex-wrap gap-1.5">
+            <Spec label="Item code" value={item.code} />
+            <Spec label="HSN" value={item.hsn} />
+            <Spec label="UoM" value="Pcs" />
+            <Spec label="Size" value={item.size} />
+            <Spec label="Inseam" value={item.inseam ?? "-"} />
+            <Spec label="Discount %" value={trim(d.discountPct)} accent />
+            <Spec label="Discount amount" value={trim(d.discountAmt)} accent />
           </div>
+          <table className="mt-2 w-full text-xs tabular-nums">
+            <thead>
+              <tr className="text-[var(--lv-gray)]">
+                <th className="py-1 text-left font-medium">Tax</th>
+                <th className="py-1 text-right font-medium">%</th>
+                <th className="py-1 text-right font-medium">Base amount</th>
+                <th className="py-1 text-right font-medium">Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(["SGST", "CGST"] as const).map((t) => (
+                <tr key={t} className="border-t border-[var(--lv-line)]">
+                  <td className="py-1.5 font-semibold">{t}</td>
+                  <td className="py-1.5 text-right">{trim(d.half)}</td>
+                  <td className="py-1.5 text-right">{trim(d.base)}</td>
+                  <td className="py-1.5 text-right">{trim(d.tax)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Collapse>
+    </li>
+  );
+}
+
+/* ------------------------------- feedback ---------------------------------------- */
+const STAR_LABELS = ["Poor", "Fair", "Good", "Very good", "Excellent"];
+const LIKES = [
+  "Product quality",
+  "Fit and comfort",
+  "Style and range",
+  "Staff service",
+  "Store ambience",
+  "Trial rooms",
+  "Billing speed",
+  "Pricing and offers",
+];
+
+function FeedbackCard({
+  name,
+  points,
+  onSubmit,
+}: {
+  name: string;
+  points: number;
+  onSubmit?: (values: FeedbackValues) => void;
+}) {
+  const [rating, setRating] = useState(0);
+  const [hover, setHover] = useState(0);
+  const [liked, setLiked] = useState<string[]>([]);
+  const [done, setDone] = useState(false);
+  const groupName = useId();
+  const shown = hover || rating;
+
+  const toggle = (label: string) =>
+    setLiked((cur) => (cur.includes(label) ? cur.filter((x) => x !== label) : [...cur, label]));
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    if (!rating) return;
+    onSubmit?.({ rating, liked });
+    setDone(true);
+  };
+
+  return (
+    <section aria-label="Shopping experience feedback" className="rounded-2xl border border-[var(--lv-line)] p-4">
+      <div className="flex items-start gap-3">
+        <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[#C41230]/10 text-[var(--lv-red)]">
+          <Icon name="star" className="h-5 w-5" />
+        </span>
+        <div>
+          <h2 className="text-sm font-semibold text-[var(--lv-red)]">Shopping Experience Feedback</h2>
+          <p className="mt-0.5 text-[13px] leading-snug text-[var(--lv-gray)]">
+            Tell us a little bit about your recent shopping experience and earn {points} RedTab points
+          </p>
         </div>
       </div>
-    </li>
+
+      {done ? (
+        <div role="status" className="mt-4 flex items-start gap-3 rounded-xl bg-[#C41230]/10 p-4">
+          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-[var(--lv-red)] text-white">
+            <Icon name="check" className="h-5 w-5" />
+          </span>
+          <p className="text-sm leading-snug">
+            <span className="block font-semibold">Thank you, {name}!</span>
+            Your feedback has been submitted. You will earn {points} RedTab points.
+          </p>
+        </div>
+      ) : (
+        <form onSubmit={submit} className="mt-4">
+          <fieldset>
+            <legend className="sr-only">Rate your shopping experience</legend>
+            <div className="flex items-center gap-1" onMouseLeave={() => setHover(0)}>
+              {[1, 2, 3, 4, 5].map((n) => (
+                <label key={n} className="relative cursor-pointer" onMouseEnter={() => setHover(n)}>
+                  <input
+                    type="radio"
+                    name={groupName}
+                    value={n}
+                    checked={rating === n}
+                    onChange={() => setRating(n)}
+                    className="peer sr-only"
+                  />
+                  <span className="sr-only">{n === 1 ? "1 star" : `${n} stars`}</span>
+                  <Icon
+                    name="star"
+                    filled={n <= shown}
+                    className={`h-9 w-9 rounded transition-colors motion-reduce:transition-none peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-[var(--lv-red)] ${
+                      n <= shown ? "text-[var(--lv-red)]" : "text-[#C9C9C9]"
+                    }`}
+                  />
+                </label>
+              ))}
+              <p aria-live="polite" className="ml-2 text-sm font-semibold">
+                {shown ? STAR_LABELS[shown - 1] : "Tap a star to rate"}
+              </p>
+            </div>
+          </fieldset>
+
+          <p className="mt-4 text-sm font-semibold">What did you like?</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {LIKES.map((label) => {
+              const on = liked.includes(label);
+              return (
+                <button
+                  key={label}
+                  type="button"
+                  aria-pressed={on}
+                  onClick={() => toggle(label)}
+                  className={`rounded-full border px-3 py-1.5 text-[13px] font-medium transition-colors motion-reduce:transition-none ${focusRing} ${
+                    on
+                      ? "border-[var(--lv-red)] bg-[var(--lv-red)] text-white"
+                      : "border-[var(--lv-line)] bg-white hover:border-[var(--lv-black)]"
+                  }`}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+
+          <button
+            type="submit"
+            disabled={rating === 0}
+            className={`mt-4 w-full rounded-xl py-3 text-sm font-semibold transition-colors motion-reduce:transition-none ${focusRing} ${
+              rating === 0
+                ? "cursor-not-allowed bg-[var(--lv-line)] text-[var(--lv-gray)]"
+                : "bg-[var(--lv-red)] text-white hover:bg-[var(--lv-red-dark)]"
+            }`}
+          >
+            Submit feedback
+          </button>
+        </form>
+      )}
+    </section>
   );
 }
 
@@ -501,20 +647,7 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "coupon", label: "Available Coupon" },
 ];
 
-function Stat({ icon, value, label, tone }: { icon: IconName; value: number; label: string; tone: string }) {
-  return (
-    <div className="flex flex-col items-center text-center">
-      <span className={`grid h-12 w-12 place-items-center rounded-full ${tone}`}>
-        <Icon name={icon} className="h-6 w-6" />
-      </span>
-      <span className={`${display.className} mt-2 text-3xl font-semibold leading-none tabular-nums`}>{value.toLocaleString("en-IN")}</span>
-      <span className="mt-1 text-xs text-[var(--lv-slate)]">{label}</span>
-    </div>
-  );
-}
-
-const inputCls =
-  "w-full rounded-lg border border-[#C9D0DC] bg-white px-3 py-2.5 text-sm outline-none transition focus:border-[var(--lv-red)] focus:ring-2 focus:ring-[#C41230]/20";
+const labelCls = "mb-1 block text-xs font-medium text-[var(--lv-gray)]";
 
 function RedTabSection({
   data,
@@ -533,8 +666,8 @@ function RedTabSection({
   const { points, rewards } = data;
 
   return (
-    <section className="mx-4 mt-6">
-      <div role="tablist" aria-label="RedTab" className="flex items-end justify-between border-b-2 border-[var(--lv-red)]">
+    <section aria-label="RedTab">
+      <div role="tablist" aria-label="RedTab" className="grid grid-cols-3 gap-1 rounded-full bg-[var(--lv-wash)] p-1">
         {TABS.map((t) => {
           const active = tab === t.id;
           return (
@@ -546,8 +679,8 @@ function RedTabSection({
               aria-selected={active}
               aria-controls={`panel-${t.id}`}
               onClick={() => setTab(t.id)}
-              className={`rounded-t-lg px-3 py-2 text-[13px] font-semibold transition-colors motion-reduce:transition-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--lv-red)] ${
-                active ? "bg-[var(--lv-red)] text-white" : "text-[var(--lv-slate)] hover:text-[var(--lv-ink)]"
+              className={`rounded-full px-2 py-2.5 text-xs font-semibold leading-tight transition-colors motion-reduce:transition-none ${focusRing} ${
+                active ? "bg-[var(--lv-red)] text-white" : "text-[var(--lv-gray)] hover:text-[var(--lv-black)]"
               }`}
             >
               {t.label}
@@ -556,19 +689,41 @@ function RedTabSection({
         })}
       </div>
 
-      <div className="rounded-b-2xl bg-[var(--lv-wash)] p-4">
+      <div className="mt-3">
         {tab === "points" && (
-          <div role="tabpanel" id="panel-points" aria-labelledby="tab-points">
-            <div className="grid grid-cols-3 gap-2 rounded-2xl bg-white px-2 py-5">
-              <Stat icon="coins" value={points.available} label="Available points" tone="bg-[#C41230]/10 text-[var(--lv-red)]" />
-              <Stat icon="trend" value={points.earned} label="Earned points" tone="bg-[#2B4568]/10 text-[var(--lv-denim)]" />
-              <Stat icon="gift" value={points.redeemed} label="Redeemed points" tone="bg-[#5B6678]/10 text-[var(--lv-slate)]" />
+          <div role="tabpanel" id="panel-points" aria-labelledby="tab-points" className="space-y-3">
+            <div className="rounded-2xl border border-[var(--lv-line)] p-4">
+              <div className="flex items-end justify-between">
+                <div>
+                  <p className="text-xs font-medium text-[var(--lv-gray)]">Available points</p>
+                  <p className={`${display.className} mt-1 text-6xl font-bold leading-none tabular-nums text-[var(--lv-red)]`}>
+                    {points.available.toLocaleString("en-IN")}
+                  </p>
+                </div>
+                <Icon name="coins" className="h-10 w-10 text-[var(--lv-red)]" />
+              </div>
+              <dl className="mt-4 grid grid-cols-2 gap-4 border-t border-[var(--lv-line)] pt-4">
+                <div className="flex items-center gap-3">
+                  <Icon name="trend" className="h-6 w-6 shrink-0" />
+                  <div>
+                    <dd className={`${display.className} text-2xl font-semibold leading-none tabular-nums`}>{points.earned.toLocaleString("en-IN")}</dd>
+                    <dt className="mt-1 text-xs text-[var(--lv-gray)]">Earned points</dt>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Icon name="gift" className="h-6 w-6 shrink-0" />
+                  <div>
+                    <dd className={`${display.className} text-2xl font-semibold leading-none tabular-nums`}>{points.redeemed.toLocaleString("en-IN")}</dd>
+                    <dt className="mt-1 text-xs text-[var(--lv-gray)]">Redeemed points</dt>
+                  </div>
+                </div>
+              </dl>
             </div>
-            <div className="mt-3 flex items-center gap-3 rounded-2xl border border-dashed border-[#D4A24C] bg-white px-4 py-3">
+            <div className="flex items-center gap-3 rounded-2xl bg-[#C41230]/10 p-4">
               <Icon name="alert" className="h-7 w-7 shrink-0 text-[var(--lv-red)]" />
-              <p className="text-sm text-[var(--lv-slate)]">
-                <span className="block font-semibold text-[var(--lv-red)]">{points.expiring.points.toLocaleString("en-IN")} points</span>
-                Expiring on <span className="font-semibold text-[var(--lv-ink)]">{points.expiring.on}</span>
+              <p className="text-sm">
+                <span className="block font-bold text-[var(--lv-red)]">{points.expiring.points.toLocaleString("en-IN")} points</span>
+                Expiring on <span className="font-semibold">{points.expiring.on}</span>
               </p>
             </div>
           </div>
@@ -579,7 +734,7 @@ function RedTabSection({
             role="tabpanel"
             id="panel-profile"
             aria-labelledby="tab-profile"
-            className="space-y-3 rounded-2xl bg-white p-4"
+            className="space-y-4 rounded-2xl border border-[var(--lv-line)] p-4"
             onSubmit={(e) => {
               e.preventDefault();
               onUpdateProfile?.(form);
@@ -590,41 +745,40 @@ function RedTabSection({
               Update your profile now to earn {rewards.profile} RedTab points, get personalised offers and more!
             </p>
             <div>
-              <span className="mb-1 block text-xs text-[var(--lv-slate)]">Mobile</span>
-              <p className="text-sm font-medium tabular-nums">{data.customer.mobile}</p>
+              <span className={labelCls}>Mobile</span>
+              <p className="text-sm font-semibold tabular-nums">{data.customer.mobile}</p>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <label>
+                <span className={labelCls}>First name</span>
+                <input className={inputCls} value={form.firstName} onChange={set("firstName")} autoComplete="given-name" />
+              </label>
+              <label>
+                <span className={labelCls}>Last name</span>
+                <input className={inputCls} value={form.lastName} onChange={set("lastName")} autoComplete="family-name" />
+              </label>
+              <label>
+                <span className={labelCls}>Birthday</span>
+                <input type="date" className={inputCls} value={form.birthday} onChange={set("birthday")} autoComplete="bday" />
+              </label>
+              <label>
+                <span className={labelCls}>Gender</span>
+                <select className={inputCls} value={form.gender} onChange={set("gender")}>
+                  <option value="">Select</option>
+                  <option>Male</option>
+                  <option>Female</option>
+                  <option>Other</option>
+                </select>
+              </label>
             </div>
             <label className="block">
-              <span className="mb-1 block text-xs text-[var(--lv-slate)]">First name</span>
-              <input className={inputCls} value={form.firstName} onChange={set("firstName")} autoComplete="given-name" />
-            </label>
-            <label className="block">
-              <span className="mb-1 block text-xs text-[var(--lv-slate)]">Last name</span>
-              <input className={inputCls} value={form.lastName} onChange={set("lastName")} autoComplete="family-name" />
-            </label>
-            <label className="block">
-              <span className="mb-1 block text-xs text-[var(--lv-slate)]">Birthday</span>
-              <input type="date" className={inputCls} value={form.birthday} onChange={set("birthday")} autoComplete="bday" />
-            </label>
-            <label className="block">
-              <span className="mb-1 block text-xs text-[var(--lv-slate)]">Gender</span>
-              <select className={inputCls} value={form.gender} onChange={set("gender")}>
-                <option value="">Select</option>
-                <option>Male</option>
-                <option>Female</option>
-                <option>Other</option>
-              </select>
-            </label>
-            <label className="block">
-              <span className="mb-1 block text-xs text-[var(--lv-slate)]">Email</span>
+              <span className={labelCls}>Email</span>
               <input type="email" className={inputCls} value={form.email} onChange={set("email")} autoComplete="email" />
             </label>
-            <button
-              type="submit"
-              className="w-full rounded-lg bg-[var(--lv-red)] py-3 text-sm font-semibold text-white transition-colors hover:bg-[#A50F28] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--lv-red)]"
-            >
+            <button type="submit" className={primaryBtn}>
               Update
             </button>
-            <p aria-live="polite" className="min-h-5 text-center text-xs text-[var(--lv-denim)]">
+            <p aria-live="polite" className="min-h-5 text-center text-xs font-semibold text-[var(--lv-red)]">
               {saved ? "Profile updated." : ""}
             </p>
           </form>
@@ -635,11 +789,11 @@ function RedTabSection({
             role="tabpanel"
             id="panel-coupon"
             aria-labelledby="tab-coupon"
-            className="flex flex-col items-center rounded-2xl border-2 border-dashed border-[#D4A24C] bg-white px-6 py-12 text-center"
+            className="flex flex-col items-center rounded-2xl border border-dashed border-[var(--lv-gray)] px-6 py-10 text-center"
           >
             <Icon name="ticket" className="h-9 w-9 text-[var(--lv-red)]" />
             <p className={`${display.className} mt-3 text-2xl font-semibold`}>No coupons available.</p>
-            <p className="mt-1 text-sm text-[var(--lv-slate)]">Please check this section later.</p>
+            <p className="mt-1 text-sm text-[var(--lv-gray)]">Please check this section later.</p>
           </div>
         )}
       </div>
@@ -652,18 +806,21 @@ export default function LevisReceiptV1({
   data = sampleLevisReceipt,
   qrSrc,
   barcodeSrc,
-  logoSrc,
+  logoSrc = "/images/levis-logo.png",
+  rdepLogoSrc = "/images/rdep-logo.png",
   onDownloadPdf = () => window.print(),
   onSendEmail,
   onUpdateProfile,
-  onFeedback,
+  onSubmitFeedback,
   onRefer,
 }: LevisReceiptProps) {
   const [openItem, setOpenItem] = useState(0);
   const [modal, setModal] = useState<ModalId>(null);
+  const [termsOpen, setTermsOpen] = useState(false);
   const [email, setEmail] = useState("");
   const [sentTo, setSentTo] = useState("");
   const closeModal = useCallback(() => setModal(null), []);
+  const termsId = useId();
 
   const { store, rewards, contact, terms } = data;
 
@@ -673,238 +830,243 @@ export default function LevisReceiptV1({
       const d = derive(item);
       const row = by.get(d.rate) ?? { rate: d.rate, base: 0, sgst: 0, cgst: 0 };
       row.base += d.base;
-      row.sgst += d.sgstAmt;
-      row.cgst += d.cgstAmt;
+      row.sgst += d.tax;
+      row.cgst += d.tax;
       by.set(d.rate, row);
     });
     return [...by.values()].sort((a, b) => a.rate - b.rate);
   }, [data.items]);
 
-  const headerBtn =
-    "grid h-9 w-9 place-items-center rounded-full bg-white/10 text-white transition-colors hover:bg-white/20 motion-reduce:transition-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white";
+  const roundBtn = `grid h-10 w-10 place-items-center rounded-full border border-[var(--lv-line)] transition-colors hover:border-[var(--lv-black)] motion-reduce:transition-none ${focusRing}`;
+  const heroRow = "flex items-baseline justify-between gap-4";
 
   return (
-    <div style={theme} className={`${body.className} min-h-screen bg-[var(--lv-wash)] text-[var(--lv-ink)] sm:py-8`}>
-      <main className="mx-auto w-full max-w-md overflow-hidden bg-white pb-8 sm:rounded-3xl sm:shadow-[0_24px_60px_-24px_rgba(15,26,43,0.4)]">
-        {/* ---------- Header: QR, invoice meta, quick actions ---------- */}
-        <header className="relative bg-[var(--lv-ink)] px-5 pb-8 pt-5 text-white">
-          <div className="flex items-start justify-between gap-4">
-            <div className="h-20 w-20 shrink-0 overflow-hidden rounded-lg bg-white p-1.5">
-              {qrSrc ? <img src={qrSrc} alt="Receipt QR code" className="h-full w-full object-contain" /> : <PlaceholderQR seed={data.receiptId} />}
-            </div>
-
-            <div className="min-w-0 text-right">
-              <p className={`${display.className} text-2xl font-semibold leading-none`}>Tax invoice</p>
-              <dl className="mt-2 space-y-0.5 text-xs text-white/70">
-                <div className="flex justify-end gap-1.5">
-                  <dt>Invoice no:</dt>
-                  <dd className="text-white">{data.invoiceNo}</dd>
-                </div>
-                <div className="flex justify-end gap-1.5">
-                  <dt className="shrink-0">Receipt ID:</dt>
-                  <dd className="break-all text-white">{data.receiptId}</dd>
-                </div>
-                <div className="flex justify-end gap-1.5">
-                  <dt>Date:</dt>
-                  <dd className="text-white">{data.date}</dd>
-                </div>
-                <div className="flex justify-end gap-1.5">
-                  <dt>Cashier:</dt>
-                  <dd className="text-white">{data.cashier}</dd>
-                </div>
-              </dl>
-              <div className="mt-3 flex justify-end gap-2">
-                <button type="button" className={headerBtn} aria-label="Transaction history" title="Transaction history" onClick={() => setModal("history")}>
-                  <Icon name="history" className="h-[18px] w-[18px]" />
-                </button>
-                <button type="button" className={headerBtn} aria-label="Email receipt" title="Email receipt" onClick={() => setModal("email")}>
-                  <Icon name="mail" className="h-[18px] w-[18px]" />
-                </button>
-                <button type="button" className={headerBtn} aria-label="Download PDF" title="Download PDF" onClick={onDownloadPdf}>
-                  <Icon name="download" className="h-[18px] w-[18px]" />
-                </button>
-              </div>
-            </div>
+    <div style={theme} className={`${body.className} min-h-screen bg-[var(--lv-wash)] text-[var(--lv-black)] sm:py-8`}>
+      <main className="mx-auto w-full max-w-md bg-white pb-8 sm:rounded-3xl sm:shadow-[0_24px_60px_-24px_rgba(17,17,17,0.35)]">
+        {/* ---------- Logo bar + quick actions ---------- */}
+        <div className="flex items-center justify-between px-5 pb-4 pt-5">
+          <Image src={logoSrc} alt="Levi's" width={160} height={64} priority className="h-10 w-auto" />
+          <div className="flex gap-2">
+            <button type="button" className={roundBtn} aria-label="Transaction history" title="Transaction history" onClick={() => setModal("history")}>
+              <Icon name="history" className="h-[18px] w-[18px]" />
+            </button>
+            <button type="button" className={roundBtn} aria-label="Email receipt" title="Email receipt" onClick={() => setModal("email")}>
+              <Icon name="mail" className="h-[18px] w-[18px]" />
+            </button>
+            <button type="button" className={roundBtn} aria-label="Download PDF" title="Download PDF" onClick={onDownloadPdf}>
+              <Icon name="download" className="h-[18px] w-[18px]" />
+            </button>
           </div>
+        </div>
 
-          {/* The red tab, hanging from the seam */}
-          <div className="absolute left-1/2 top-full z-10 -translate-x-1/2">
-            <div className="relative flex h-16 w-28 items-center justify-center rounded-b-md bg-[var(--lv-red)] text-white">
-              <span aria-hidden="true" className="pointer-events-none absolute inset-1.5 rounded-b border border-dashed border-white/40" />
-              {logoSrc ? (
-                <img src={logoSrc} alt="Levi's" className="relative h-6 w-auto" />
+        {/* ---------- Hero: greeting, QR, invoice details ---------- */}
+        <section className="mx-4 rounded-3xl bg-[var(--lv-red)] p-5 text-white">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-white/90">Tax invoice</p>
+              <h1 className={`${display.className} mt-1 text-4xl font-semibold leading-none`}>Hello {data.customer.firstName}!</h1>
+            </div>
+            <div className="h-20 w-20 shrink-0 overflow-hidden rounded-xl bg-white p-1.5">
+              {qrSrc ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={qrSrc} alt="Receipt QR code" className="h-full w-full object-contain" />
               ) : (
-                <span className={`${display.className} relative text-[28px] font-bold leading-none tracking-tight`}>
-                  Levi&apos;s<sup className="ml-0.5 align-top text-[9px] font-medium">®</sup>
-                </span>
+                <PlaceholderQR seed={data.receiptId} />
               )}
             </div>
           </div>
-        </header>
 
-        {/* ---------- Store details + greeting ---------- */}
-        <section className="px-5 pb-6 pt-12 text-center">
-          <h2 className={`${display.className} text-2xl font-semibold`}>{store.name}</h2>
-          <p className="mt-1 text-sm font-medium">{store.branch}</p>
-          <p className="mx-auto mt-1 max-w-xs text-sm leading-snug text-[var(--lv-slate)]">{store.address}</p>
-
-          <dl className="mt-4 grid grid-cols-3 gap-2 border-y border-dashed border-[#D4A24C] py-3 text-center">
-            {[
-              ["Store code", store.code],
-              ["Phone no.", store.phone],
-              ["Store timing", store.timing],
-            ].map(([k, v]) => (
-              <div key={k}>
-                <dt className="text-xs text-[var(--lv-slate)]">{k}</dt>
-                <dd className="mt-0.5 text-[13px] font-medium leading-tight tabular-nums">{v}</dd>
-              </div>
-            ))}
+          <dl className="mt-5 space-y-2 border-t border-dashed border-white/60 pt-4 text-sm">
+            <div className={heroRow}>
+              <dt className="text-white/90">Invoice no</dt>
+              <dd className="font-semibold tabular-nums">{data.invoiceNo}</dd>
+            </div>
+            <div className={heroRow}>
+              <dt className="shrink-0 text-white/90">Receipt ID</dt>
+              <dd className="break-all text-right font-semibold tabular-nums">{data.receiptId}</dd>
+            </div>
+            <div className={heroRow}>
+              <dt className="text-white/90">Date</dt>
+              <dd className="font-semibold tabular-nums">{data.date}</dd>
+            </div>
+            <div className={heroRow}>
+              <dt className="text-white/90">Cashier</dt>
+              <dd className="font-semibold tabular-nums">{data.cashier}</dd>
+            </div>
           </dl>
-          <p className="mt-3 text-xs text-[var(--lv-slate)]">
-            Legal name: <span className="text-[var(--lv-ink)]">{store.legalName}</span>
-          </p>
-
-          <h1 className={`${display.className} mt-6 text-4xl font-semibold`}>Hello {data.customer.firstName}!</h1>
         </section>
 
-        {/* ---------- Items: the stitched pocket ---------- */}
-        <section aria-label="Items purchased" className="mx-4 rounded-2xl border-2 border-dashed border-[var(--lv-stitch)] px-3 pb-4 pt-3">
-          <div className={`${ROW_GRID} border-b border-[var(--lv-ink)] pb-2 text-xs font-semibold text-[var(--lv-slate)]`}>
-            <span>Item name</span>
-            <span className="text-center">Qty</span>
-            <span className="text-right">MRP</span>
-            <span className="text-right">Net amount</span>
-          </div>
+        <div className="space-y-6 px-4 pt-6">
+          {/* ---------- Store ---------- */}
+          <section aria-label="Store">
+            <h2 className={`${display.className} text-2xl font-semibold leading-tight`}>{store.name}</h2>
+            <p className="mt-1 text-sm font-medium">{store.branch}</p>
+            <p className="mt-0.5 text-sm leading-snug text-[var(--lv-gray)]">{store.address}</p>
+            <dl className="mt-4 grid grid-cols-3 divide-x divide-[var(--lv-line)] border-y border-[var(--lv-line)] py-3 text-center">
+              {[
+                ["Store code", store.code],
+                ["Phone no.", store.phone],
+                ["Store timing", store.timing],
+              ].map(([k, v]) => (
+                <div key={k} className="px-2">
+                  <dt className="text-xs text-[var(--lv-gray)]">{k}</dt>
+                  <dd className="mt-0.5 text-[13px] font-semibold leading-tight tabular-nums">{v}</dd>
+                </div>
+              ))}
+            </dl>
+            <p className="mt-3 text-xs text-[var(--lv-gray)]">
+              Legal name: <span className="font-medium text-[var(--lv-black)]">{store.legalName}</span>
+            </p>
+          </section>
 
-          <ul>
-            {data.items.map((item, i) => (
-              <ItemRow key={`${item.code}-${i}`} item={item} open={openItem === i} onToggle={() => setOpenItem(openItem === i ? -1 : i)} />
-            ))}
-          </ul>
+          {/* ---------- Items + totals ---------- */}
+          <section aria-label="Items purchased">
+            <ul className="divide-y divide-[var(--lv-line)] border-t border-[var(--lv-black)]">
+              {data.items.map((item, i) => (
+                <ItemRow key={`${item.code}-${i}`} item={item} open={openItem === i} onToggle={() => setOpenItem(openItem === i ? -1 : i)} />
+              ))}
+            </ul>
 
-          <dl className="mt-3 space-y-1 border-t border-[var(--lv-ink)] pt-3">
-            <div className="flex items-baseline justify-between text-sm">
-              <dt className="text-[var(--lv-slate)]">Sub total</dt>
-              <dd className="tabular-nums">{inr(data.subTotal)}</dd>
+            <div className="flex items-baseline justify-between border-t border-[var(--lv-black)] pt-3 text-sm">
+              <span className="text-[var(--lv-gray)]">Sub total</span>
+              <span className="font-semibold tabular-nums">{inr(data.subTotal)}</span>
             </div>
-            <div className="flex items-baseline justify-between">
-              <dt className={`${display.className} text-xl font-semibold`}>Net total</dt>
-              <dd className={`${display.className} text-3xl font-bold tabular-nums text-[var(--lv-red)]`}>₹{inr(data.netTotal)}</dd>
+
+            <div className="mt-3 flex items-center justify-between rounded-2xl bg-[var(--lv-black)] px-4 py-3.5 text-white">
+              <span className={`${display.className} text-xl font-semibold`}>Net total</span>
+              <span className={`${display.className} text-3xl font-bold tabular-nums`}>₹{inr(data.netTotal)}</span>
             </div>
-            <p className="text-right text-xs text-[var(--lv-slate)]">Pieces purchased: {data.pieces}</p>
-          </dl>
+
+            <div className="mt-3 flex items-center justify-between">
+              <p className="text-xs text-[var(--lv-gray)]">Pieces purchased: {data.pieces}</p>
+              <button
+                type="button"
+                onClick={() => setModal("tax")}
+                className={`rounded-md py-1 text-sm font-semibold text-[var(--lv-red)] underline-offset-4 hover:underline ${focusRing}`}
+              >
+                View tax calculation
+              </button>
+            </div>
+          </section>
+
+          {/* ---------- Payment ---------- */}
+          <section aria-label="Payment">
+            <h2 className={`${display.className} text-xl font-semibold`}>Payment</h2>
+            <ul className="mt-1 divide-y divide-[var(--lv-line)] border-y border-[var(--lv-line)]">
+              {data.payments.map((p) => (
+                <li key={p.mode} className="flex items-baseline justify-between py-2.5 text-sm">
+                  <span className="font-semibold">{p.mode}</span>
+                  <span className="tabular-nums">{inr(p.amount)}</span>
+                </li>
+              ))}
+            </ul>
+          </section>
+
+          {/* ---------- Feedback + refer ---------- */}
+          <FeedbackCard name={data.customer.firstName} points={rewards.feedback} onSubmit={onSubmitFeedback} />
 
           <button
             type="button"
-            onClick={() => setModal("tax")}
-            className="mt-3 w-full rounded-lg border border-[var(--lv-red)] py-2.5 text-sm font-semibold text-[var(--lv-red)] transition-colors hover:bg-[#C41230]/10 motion-reduce:transition-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--lv-red)]"
+            onClick={onRefer}
+            className={`flex w-full items-center gap-3 rounded-2xl border border-[var(--lv-line)] p-4 text-left transition-colors hover:border-[var(--lv-red)] motion-reduce:transition-none ${focusRing}`}
           >
-            View tax calculation
+            <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[#C41230]/10 text-[var(--lv-red)]">
+              <Icon name="users" className="h-5 w-5" />
+            </span>
+            <span>
+              <span className="block text-sm font-semibold text-[var(--lv-red)]">Refer a friend</span>
+              <span className="mt-0.5 block text-[13px] leading-snug text-[var(--lv-gray)]">
+                Refer a friend and both of you earn {rewards.refer} RedTab points
+              </span>
+            </span>
           </button>
-        </section>
 
-        {/* ---------- Payment ---------- */}
-        <section aria-label="Payment" className="mx-4 mt-4 rounded-2xl bg-[var(--lv-wash)] px-4 py-3">
-          <h2 className={`${display.className} text-lg font-semibold`}>Payment</h2>
-          <ul className="mt-1 divide-y divide-dashed divide-[#D4A24C]/70">
-            {data.payments.map((p) => (
-              <li key={p.mode} className="flex items-baseline justify-between py-2 text-sm">
-                <span className="font-medium">{p.mode}</span>
-                <span className="tabular-nums">{inr(p.amount)}</span>
-              </li>
-            ))}
-          </ul>
-        </section>
+          {/* ---------- RedTab ---------- */}
+          <RedTabSection data={data} onUpdateProfile={onUpdateProfile} />
 
-        {/* ---------- Earn-points actions ---------- */}
-        <section aria-label="Earn RedTab points" className="mx-4 mt-4 space-y-2">
-          {([
-            { icon: "star", title: "Shopping Experience Feedback", text: `Tell us a little bit about your recent shopping experience and earn ${rewards.feedback} RedTab points`, onClick: onFeedback },
-            { icon: "users", title: "Refer a friend", text: `Refer a friend and both of you earn ${rewards.refer} RedTab points`, onClick: onRefer },
-          ] as { icon: IconName; title: string; text: string; onClick?: () => void }[]).map((a) => (
-            <button
-              key={a.title}
-              type="button"
-              onClick={a.onClick}
-              className="flex w-full items-center gap-3 rounded-2xl border border-[#E1E5EC] bg-white p-3 text-left transition-colors hover:border-[var(--lv-red)] motion-reduce:transition-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--lv-red)]"
-            >
-              <span className="grid h-12 w-12 shrink-0 place-items-center rounded-xl bg-[#C41230]/10 text-[var(--lv-red)]">
-                <Icon name={a.icon} className="h-6 w-6" />
-              </span>
-              <span>
-                <span className="block text-sm font-semibold text-[var(--lv-red)]">{a.title}</span>
-                <span className="mt-0.5 block text-[13px] leading-snug text-[var(--lv-slate)]">{a.text}</span>
-              </span>
-            </button>
-          ))}
-        </section>
+          {/* ---------- Reach out ---------- */}
+          <section aria-label="Reach out to us">
+            <h2 className={`${display.className} text-xl font-semibold`}>Reach out to us</h2>
+            <div className="mt-3 grid grid-cols-2 gap-3">
+              <a
+                href={`tel:${contact.tollFree.replace(/\s/g, "")}`}
+                className={`flex items-center justify-center gap-2 rounded-xl border border-[var(--lv-black)] py-3 text-sm font-semibold transition-colors hover:bg-[var(--lv-black)] hover:text-white motion-reduce:transition-none ${focusRing}`}
+              >
+                <Icon name="phone" className="h-[18px] w-[18px]" />
+                Talk to us
+              </a>
+              <a
+                href={`mailto:${contact.email}`}
+                className={`flex items-center justify-center gap-2 rounded-xl border border-[var(--lv-black)] py-3 text-sm font-semibold transition-colors hover:bg-[var(--lv-black)] hover:text-white motion-reduce:transition-none ${focusRing}`}
+              >
+                <Icon name="mail" className="h-[18px] w-[18px]" />
+                Write to us
+              </a>
+            </div>
+          </section>
 
-        {/* ---------- RedTab tabs ---------- */}
-        <RedTabSection data={data} onUpdateProfile={onUpdateProfile} />
+          {/* ---------- Terms (collapsible) ---------- */}
+          <section aria-label="Terms and conditions" className="border-y border-[var(--lv-line)]">
+            <h2>
+              <button
+                type="button"
+                aria-expanded={termsOpen}
+                aria-controls={termsId}
+                onClick={() => setTermsOpen((o) => !o)}
+                className={`${display.className} flex w-full items-center justify-between py-4 text-xl font-semibold ${focusRing}`}
+              >
+                Terms and conditions
+                <Icon name="chevron" className={`h-5 w-5 transition-transform duration-300 motion-reduce:transition-none ${termsOpen ? "rotate-180" : ""}`} />
+              </button>
+            </h2>
+            <Collapse open={termsOpen} id={termsId}>
+              <div className="space-y-3 pb-4 text-xs leading-relaxed text-[var(--lv-gray)]">
+                <p>{terms.intro}</p>
+                <ol className="list-decimal space-y-2 pl-5">
+                  {terms.list.map((t) => (
+                    <li key={t}>{t}</li>
+                  ))}
+                </ol>
+                <p>
+                  Customer toll free no- {contact.tollFree}, {contact.hours}
+                </p>
+                <p>Email – {contact.email}</p>
+                <p>{terms.note}</p>
+              </div>
+            </Collapse>
+          </section>
 
-        {/* ---------- Reach out ---------- */}
-        <section aria-label="Reach out to us" className="mx-4 mt-6 rounded-2xl bg-[var(--lv-ink)] px-4 py-4 text-white">
-          <h2 className={`${display.className} text-xl font-semibold`}>Reach out to us</h2>
-          <div className="mt-3 grid grid-cols-2 gap-3">
-            <a
-              href={`tel:${contact.tollFree.replace(/\s/g, "")}`}
-              className="flex flex-col items-center gap-1.5 rounded-xl bg-white/10 py-3 text-sm transition-colors hover:bg-white/20 motion-reduce:transition-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
-            >
-              <Icon name="phone" />
-              Talk to us
-            </a>
-            <a
-              href={`mailto:${contact.email}`}
-              className="flex flex-col items-center gap-1.5 rounded-xl bg-white/10 py-3 text-sm transition-colors hover:bg-white/20 motion-reduce:transition-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
-            >
-              <Icon name="mail" />
-              Write to us
-            </a>
-          </div>
-        </section>
-
-        {/* ---------- Terms and conditions ---------- */}
-        <section aria-label="Terms and conditions" className="mx-4 mt-6">
-          <h2 className={`${display.className} text-xl font-semibold`}>Terms and conditions</h2>
-          <div className="mt-2 space-y-3 text-xs leading-relaxed text-[var(--lv-slate)]">
-            <p>{terms.intro}</p>
-            <ol className="list-decimal space-y-2 pl-5">
-              {terms.list.map((t) => (
-                <li key={t}>{t}</li>
-              ))}
-            </ol>
-            <p>
-              Customer toll free no- {contact.tollFree}, {contact.hours}
-            </p>
-            <p>Email – {contact.email}</p>
-            <p>{terms.note}</p>
-          </div>
-        </section>
-
-        {/* ---------- Footer ---------- */}
-        <footer className="mt-8 flex flex-col items-center gap-3 px-4">
-          {barcodeSrc ? <img src={barcodeSrc} alt="Receipt barcode" className="h-14 w-full max-w-xs object-contain" /> : <PlaceholderBarcode seed={data.receiptId} />}
-          <p className="text-xs text-[var(--lv-slate)]">
-            Powered by <span className={`${display.className} text-lg font-bold text-[var(--lv-ink)]`}>rdep</span>
-          </p>
-        </footer>
+          {/* ---------- Footer ---------- */}
+          <footer className="flex flex-col items-center gap-3 pt-2">
+            {barcodeSrc ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={barcodeSrc} alt="Receipt barcode" className="h-14 w-full max-w-xs object-contain" />
+            ) : (
+              <PlaceholderBarcode seed={data.receiptId} />
+            )}
+            <div className="flex items-center gap-2 text-xs text-[var(--lv-gray)]">
+              <span>Powered by</span>
+              <Image src={rdepLogoSrc} alt="rdep" width={96} height={32} className="h-5 w-auto" />
+            </div>
+          </footer>
+        </div>
       </main>
 
       {/* ---------------------------- Modals ---------------------------------------- */}
       {modal === "history" && (
         <Modal title="Transaction history" onClose={closeModal}>
-          <ul className="divide-y divide-dashed divide-[#D4A24C]/70">
+          <ul className="divide-y divide-[var(--lv-line)]">
             {data.history.map((h) => (
               <li key={h.invoiceNo} className="flex items-center justify-between gap-3 py-3">
                 <div className="min-w-0">
                   <p className="text-sm font-semibold">Invoice no: {h.invoiceNo}</p>
-                  <p className="text-xs text-[var(--lv-slate)]">
+                  <p className="text-xs text-[var(--lv-gray)]">
                     {h.date}, {h.store}
                   </p>
                 </div>
                 <div className="shrink-0 text-right">
                   <p className="text-sm font-semibold tabular-nums">₹{inr(h.amount)}</p>
-                  {h.current && <p className="text-xs font-medium text-[var(--lv-red)]">This receipt</p>}
+                  {h.current && <p className="text-xs font-semibold text-[var(--lv-red)]">This receipt</p>}
                 </div>
               </li>
             ))}
@@ -923,16 +1085,23 @@ export default function LevisReceiptV1({
             }}
           >
             <label className="block">
-              <span className="mb-1 block text-xs text-[var(--lv-slate)]">Email address</span>
-              <input type="email" required value={email} onChange={(e) => { setSentTo(""); setEmail(e.target.value); }} className={inputCls} autoComplete="email" />
+              <span className={labelCls}>Email address</span>
+              <input
+                type="email"
+                required
+                value={email}
+                onChange={(e) => {
+                  setSentTo("");
+                  setEmail(e.target.value);
+                }}
+                className={inputCls}
+                autoComplete="email"
+              />
             </label>
-            <button
-              type="submit"
-              className="w-full rounded-lg bg-[var(--lv-red)] py-3 text-sm font-semibold text-white transition-colors hover:bg-[#A50F28] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--lv-red)]"
-            >
+            <button type="submit" className={primaryBtn}>
               Send receipt
             </button>
-            <p aria-live="polite" className="flex min-h-5 items-center justify-center gap-1.5 text-xs text-[var(--lv-denim)]">
+            <p aria-live="polite" className="flex min-h-5 items-center justify-center gap-1.5 text-xs font-semibold text-[var(--lv-red)]">
               {sentTo && (
                 <>
                   <Icon name="check" className="h-4 w-4" /> Receipt sent to {sentTo}
@@ -948,7 +1117,7 @@ export default function LevisReceiptV1({
           <div className="overflow-x-auto">
             <table className="w-full text-sm tabular-nums">
               <thead>
-                <tr className="border-b border-[var(--lv-ink)] text-xs text-[var(--lv-slate)]">
+                <tr className="border-b border-[var(--lv-black)] text-xs text-[var(--lv-gray)]">
                   <th className="py-2 text-left font-semibold">GST slab</th>
                   <th className="py-2 text-right font-semibold">Taxable value</th>
                   <th className="py-2 text-right font-semibold">SGST</th>
@@ -957,7 +1126,7 @@ export default function LevisReceiptV1({
               </thead>
               <tbody>
                 {taxRows.map((r) => (
-                  <tr key={r.rate} className="border-b border-dashed border-[#D4A24C]/70">
+                  <tr key={r.rate} className="border-b border-[var(--lv-line)]">
                     <td className="py-2.5">{r.rate}%</td>
                     <td className="py-2.5 text-right">{inr(r.base)}</td>
                     <td className="py-2.5 text-right">{inr(r.sgst)}</td>
@@ -975,9 +1144,9 @@ export default function LevisReceiptV1({
               </tfoot>
             </table>
           </div>
-          <p className="mt-4 flex items-baseline justify-between border-t border-[var(--lv-ink)] pt-3">
+          <p className="mt-4 flex items-baseline justify-between rounded-2xl bg-[var(--lv-black)] px-4 py-3 text-white">
             <span className={`${display.className} text-lg font-semibold`}>Net total</span>
-            <span className={`${display.className} text-2xl font-bold text-[var(--lv-red)]`}>₹{inr(data.netTotal)}</span>
+            <span className={`${display.className} text-2xl font-bold`}>₹{inr(data.netTotal)}</span>
           </p>
         </Modal>
       )}
