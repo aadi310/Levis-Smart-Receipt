@@ -95,6 +95,12 @@ export interface LevisReceipt {
     writeTo: string;
   };
   referral: { code: string; signupUrl: string };
+  tax: {
+    lines: { type: "CGST" | "SGST"; rate: number; base: number; amount: number }[];
+    customerGst: string;
+    placeOfSupply: string;
+    reverseCharge: string;
+  };
   terms: { intro: string; list: string[]; note: string };
   history: { invoiceNo: string; date: string; store: string; amount: number; current?: boolean }[];
 }
@@ -170,6 +176,33 @@ function seeded(seed: string): () => number {
 const buildReferralMessage = (code: string, url: string, points: number): string =>
   `Hey, Use my referral code *${code}* and register for Levi's Redtab member program to enjoy exclusive benefits like earning points on every transaction, birthday surprises, special offers & more! Sign up here: ${url} We both earn ${points} reward points once you register successfully. Let's shop together! *T&C apply.`;
 
+/** Groups items by GST slab. Base + CGST + SGST adds up exactly to the items' net amounts. */
+function buildTax(items: ReceiptItem[]) {
+  const by = new Map<number, { net: number; base: number }>();
+  items.forEach((item) => {
+    const d = derive(item);
+    const row = by.get(d.rate) ?? { net: 0, base: 0 };
+    row.net += item.net;
+    row.base += d.base;
+    by.set(d.rate, row);
+  });
+  const slabs = [...by.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([rate, v]) => {
+      const base = round2(v.base);
+      const tax = round2(v.net - base);
+      const cgst = round2(tax / 2);
+      return { rate, base, cgst, sgst: round2(tax - cgst) };
+    });
+  return {
+    subTotal: round2(slabs.reduce((a, x) => a + x.base, 0)),
+    lines: [
+      ...slabs.map((x) => ({ type: "CGST" as const, rate: x.rate / 2, base: x.base, amount: x.cgst })),
+      ...slabs.map((x) => ({ type: "SGST" as const, rate: x.rate / 2, base: x.base, amount: x.sgst })),
+    ],
+  };
+}
+
 /* ----------------------------------------------------------------------------------
  * Sample data (shape mirrors the current receipt). Item 1 is the real line from the
  * current receipt; item codes / HSN / sizes for items 2–3 are SAMPLE values.
@@ -179,6 +212,8 @@ const ITEMS: ReceiptItem[] = [
   { name: "BLR MB 511 SLIM ALOKI", qty: 1, mrp: 3789, net: 3256.52, code: "A112340071", hsn: "62034200", size: "32", inseam: "32" },
   { name: "BNG MT CL1PKT_TRIM SHRT L/S CLASSIC REGU", qty: 1, mrp: 3299, net: 2835.38, code: "A558120044", hsn: "62052000", size: "L" },
 ];
+
+const SAMPLE_TAX = buildTax(ITEMS);
 
 export const sampleLevisReceipt: LevisReceipt = {
   invoiceNo: "7019",
@@ -196,7 +231,7 @@ export const sampleLevisReceipt: LevisReceipt = {
   },
   customer: { firstName: "Rashad", mobile: "7250230751" },
   items: ITEMS,
-  subTotal: round2(ITEMS.reduce((s, i) => s + derive(i).base, 0)),
+  subTotal: SAMPLE_TAX.subTotal,
   netTotal: round2(ITEMS.reduce((s, i) => s + i.net, 0)),
   pieces: ITEMS.reduce((s, i) => s + i.qty, 0),
   payments: [
@@ -213,6 +248,12 @@ export const sampleLevisReceipt: LevisReceipt = {
     writeTo: "sagar.p@proenx.com",
   },
   referral: { code: "LEV12WU0SE", signupUrl: "https://levisredtabmemberin.erlpaas.com/" },
+  tax: {
+    lines: SAMPLE_TAX.lines,
+    customerGst: "Unregistered",
+    placeOfSupply: "West Bengal",
+    reverseCharge: "No",
+  },
   terms: {
     intro:
       "We hope you love your Levi's® product. In case you are not satisfied, you may present the sale invoice and exchange the product within 14 days from the date of purchase*. Subject to the terms and conditions listed below, products can only be exchanged and under no circumstances can any amount be refunded.",
@@ -869,85 +910,20 @@ export default function LevisReceiptV1({
   const { store, rewards, contact, terms, referral } = data;
   const whatsappHref = `https://wa.me/?text=${encodeURIComponent(buildReferralMessage(referral.code, referral.signupUrl, rewards.refer))}`;
 
-  const taxRows = useMemo(() => {
-    const by = new Map<number, { rate: number; base: number; sgst: number; cgst: number }>();
-    data.items.forEach((item) => {
-      const d = derive(item);
-      const row = by.get(d.rate) ?? { rate: d.rate, base: 0, sgst: 0, cgst: 0 };
-      row.base += d.base;
-      row.sgst += d.tax;
-      row.cgst += d.tax;
-      by.set(d.rate, row);
-    });
-    return [...by.values()].sort((a, b) => a.rate - b.rate);
-  }, [data.items]);
-
-  const roundBtn = `grid h-10 w-10 place-items-center rounded-full border border-[var(--lv-line)] transition-colors hover:border-[var(--lv-red)] hover:text-[var(--lv-red)] motion-reduce:transition-none ${focusRing}`;
-  const heroRow = "flex items-baseline justify-between gap-4";
+  const taxTotals = useMemo(() => {
+    const sum = (t: "CGST" | "SGST") =>
+      round2(data.tax.lines.filter((l) => l.type === t).reduce((acc, l) => acc + l.amount, 0));
+    return { cgst: sum("CGST"), sgst: sum("SGST") };
+  }, [data.tax.lines]);
 
   return (
     <div style={theme} className={`${body.className} min-h-screen bg-[var(--lv-wash)] text-[var(--lv-black)] sm:py-8`}>
       <main className="mx-auto w-full max-w-md bg-white pb-8 sm:rounded-3xl sm:shadow-[0_24px_60px_-24px_rgba(17,17,17,0.35)]">
-        {/* ---------- Logo bar + quick actions ---------- */}
-        <div className="flex items-center justify-between px-5 pb-4 pt-5">
-          <Image src={logoSrc} alt="Levi's" width={160} height={64} priority className="h-10 w-auto" />
-          <div className="flex gap-2">
-            <button type="button" className={roundBtn} aria-label="Transaction history" title="Transaction history" onClick={() => setModal("history")}>
-              <Icon name="history" className="h-[18px] w-[18px]" />
-            </button>
-            <button type="button" className={roundBtn} aria-label="Email receipt" title="Email receipt" onClick={() => setModal("email")}>
-              <Icon name="mail" className="h-[18px] w-[18px]" />
-            </button>
-            <button type="button" className={roundBtn} aria-label="Download PDF" title="Download PDF" onClick={onDownloadPdf}>
-              <Icon name="download" className="h-[18px] w-[18px]" />
-            </button>
-          </div>
-        </div>
-
-        {/* ---------- Hero: greeting, QR, invoice details ---------- */}
-        <section className="mx-4 rounded-3xl bg-[var(--lv-red)] p-5 text-white">
-          <div className="flex items-start justify-between gap-4">
-            <div className="min-w-0">
-              <p className="text-sm font-medium text-white/90">Tax invoice</p>
-              <h1 className={`${display.className} mt-1 text-4xl font-semibold leading-none`}>Hello {data.customer.firstName}!</h1>
-            </div>
-            <div className="h-20 w-20 shrink-0 overflow-hidden rounded-xl bg-white p-1.5">
-              {qrSrc ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={qrSrc} alt="Receipt QR code" className="h-full w-full object-contain" />
-              ) : (
-                <PlaceholderQR seed={data.receiptId} />
-              )}
-            </div>
-          </div>
-
-          <dl className="mt-5 space-y-2 border-t border-dashed border-white/60 pt-4 text-sm">
-            <div className={heroRow}>
-              <dt className="text-white/90">Invoice no</dt>
-              <dd className="font-semibold tabular-nums">{data.invoiceNo}</dd>
-            </div>
-            <div className={heroRow}>
-              <dt className="shrink-0 text-white/90">Receipt ID</dt>
-              <dd className="break-all text-right font-semibold tabular-nums">{data.receiptId}</dd>
-            </div>
-            <div className={heroRow}>
-              <dt className="text-white/90">Date</dt>
-              <dd className="font-semibold tabular-nums">{data.date}</dd>
-            </div>
-            <div className={heroRow}>
-              <dt className="text-white/90">Cashier</dt>
-              <dd className="font-semibold tabular-nums">{data.cashier}</dd>
-            </div>
-          </dl>
-        </section>
-
-        <div className="space-y-6 px-4 pt-6">
-          {/* ---------- Store ---------- */}
+        <div className="space-y-6 px-4 pt-5">
+          {/* ---------- Store (logo lives here) ---------- */}
           <section aria-label="Store" className="rounded-2xl border border-[var(--lv-line)] p-4">
             <div className="flex items-center gap-3">
-              <span className="grid h-12 w-12 shrink-0 place-items-center rounded-xl bg-[var(--lv-red)] text-white">
-                <Icon name="store" className="h-6 w-6" />
-              </span>
+              <Image src={logoSrc} alt="Levi's" width={160} height={64} priority className="h-12 w-auto shrink-0" />
               <div className="min-w-0">
                 <h2 className={`${display.className} text-2xl font-semibold leading-tight`}>{store.name}</h2>
                 <p className="text-sm font-semibold">{store.branch}</p>
@@ -992,6 +968,38 @@ export default function LevisReceiptV1({
             </p>
           </section>
 
+          {/* ---------- Invoice: compact greeting card ---------- */}
+          <section aria-label="Invoice" className="rounded-3xl bg-[var(--lv-red)] p-4 text-white">
+            <div className="flex items-center justify-between gap-4">
+              <div className="min-w-0">
+                <p className="text-xs font-medium text-white/90">Tax invoice</p>
+                <h1 className={`${display.className} mt-0.5 text-3xl font-semibold leading-none`}>Hello {data.customer.firstName}!</h1>
+              </div>
+              <div className="h-16 w-16 shrink-0 overflow-hidden rounded-xl bg-white p-1">
+                {qrSrc ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={qrSrc} alt="Receipt QR code" className="h-full w-full object-contain" />
+                ) : (
+                  <PlaceholderQR seed={data.receiptId} />
+                )}
+              </div>
+            </div>
+
+            <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 border-t border-dashed border-white/60 pt-3">
+              {[
+                ["Invoice no", data.invoiceNo],
+                ["Date", data.date],
+                ["Receipt ID", data.receiptId],
+                ["Cashier", data.cashier],
+              ].map(([k, v]) => (
+                <div key={k} className="min-w-0">
+                  <dt className="text-[11px] text-white/90">{k}</dt>
+                  <dd className="break-all text-[13px] font-semibold leading-tight tabular-nums">{v}</dd>
+                </div>
+              ))}
+            </dl>
+          </section>
+
           {/* ---------- Items + totals: one bill card ---------- */}
           <section aria-label="Items purchased" className="overflow-hidden rounded-2xl border border-[var(--lv-line)]">
             <div className="h-1 bg-[var(--lv-red)]" />
@@ -1007,14 +1015,24 @@ export default function LevisReceiptV1({
             </ul>
 
             <div className="border-t border-[var(--lv-line)] px-4 py-3">
-              <div className="flex items-baseline justify-between text-sm">
-                <span className="text-[var(--lv-gray)]">Sub total</span>
-                <span className="font-semibold tabular-nums">{inr(data.subTotal)}</span>
-              </div>
+              <dl className="space-y-1.5 text-sm tabular-nums">
+                <div className="flex items-baseline justify-between">
+                  <dt className="text-[var(--lv-gray)]">Sub total</dt>
+                  <dd className="font-semibold">{inr(data.subTotal)}</dd>
+                </div>
+                <div className="flex items-baseline justify-between">
+                  <dt className="text-[var(--lv-gray)]">CGST</dt>
+                  <dd className="font-semibold">+ {inr(taxTotals.cgst)}</dd>
+                </div>
+                <div className="flex items-baseline justify-between">
+                  <dt className="text-[var(--lv-gray)]">SGST</dt>
+                  <dd className="font-semibold">+ {inr(taxTotals.sgst)}</dd>
+                </div>
+              </dl>
               <button
                 type="button"
                 onClick={() => setModal("tax")}
-                className={`mt-1 rounded-md py-1 text-sm font-semibold text-[var(--lv-red)] underline-offset-4 hover:underline ${focusRing}`}
+                className={`mt-2 rounded-md py-1 text-sm font-semibold text-[var(--lv-red)] underline-offset-4 hover:underline ${focusRing}`}
               >
                 View tax calculation
               </button>
@@ -1037,6 +1055,29 @@ export default function LevisReceiptV1({
                 </li>
               ))}
             </ul>
+          </section>
+
+          {/* ---------- Receipt actions ---------- */}
+          <section aria-label="Receipt actions" className="grid grid-cols-3 gap-2">
+            {(
+              [
+                { icon: "history", label: "Transaction history", onClick: () => setModal("history") },
+                { icon: "mail", label: "Email receipt", onClick: () => setModal("email") },
+                { icon: "download", label: "Download PDF", onClick: onDownloadPdf },
+              ] as { icon: IconName; label: string; onClick: () => void }[]
+            ).map((a) => (
+              <button
+                key={a.label}
+                type="button"
+                onClick={a.onClick}
+                className={`group flex flex-col items-center gap-2 rounded-2xl border border-[var(--lv-line)] px-2 py-3.5 text-center text-xs font-semibold leading-tight transition-colors hover:border-[var(--lv-red)] hover:text-[var(--lv-red)] motion-reduce:transition-none ${focusRing}`}
+              >
+                <span className="grid h-10 w-10 place-items-center rounded-full bg-[#C41230]/10 text-[var(--lv-red)] transition-colors group-hover:bg-[var(--lv-red)] group-hover:text-white motion-reduce:transition-none">
+                  <Icon name={a.icon} className="h-5 w-5" />
+                </span>
+                {a.label}
+              </button>
+            ))}
           </section>
 
           {/* ---------- Feedback + refer ---------- */}
@@ -1193,36 +1234,48 @@ export default function LevisReceiptV1({
 
       {modal === "tax" && (
         <Modal title="Tax calculation" onClose={closeModal}>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm tabular-nums">
-              <thead>
-                <tr className="border-b border-[var(--lv-black)] text-xs text-[var(--lv-gray)]">
-                  <th className="py-2 text-left font-semibold">GST slab</th>
-                  <th className="py-2 text-right font-semibold">Taxable value</th>
-                  <th className="py-2 text-right font-semibold">SGST</th>
-                  <th className="py-2 text-right font-semibold">CGST</th>
+          <table className="w-full text-sm tabular-nums">
+            <thead>
+              <tr className="border-b border-[var(--lv-black)] text-xs text-[var(--lv-gray)]">
+                <th className="py-2 text-left font-semibold">Tax</th>
+                <th className="py-2 text-right font-semibold">Base amount</th>
+                <th className="py-2 text-right font-semibold">Tax amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.tax.lines.map((l) => (
+                <tr key={`${l.type}-${l.rate}`} className="border-b border-[var(--lv-line)]">
+                  <td className="py-2.5 font-semibold">
+                    {l.type} @ {l.rate}%
+                  </td>
+                  <td className="py-2.5 text-right">{inr(l.base)}</td>
+                  <td className="py-2.5 text-right">{inr(l.amount)}</td>
                 </tr>
-              </thead>
-              <tbody>
-                {taxRows.map((r) => (
-                  <tr key={r.rate} className="border-b border-[var(--lv-line)]">
-                    <td className="py-2.5">{r.rate}%</td>
-                    <td className="py-2.5 text-right">{inr(r.base)}</td>
-                    <td className="py-2.5 text-right">{inr(r.sgst)}</td>
-                    <td className="py-2.5 text-right">{inr(r.cgst)}</td>
-                  </tr>
-                ))}
-              </tbody>
-              <tfoot>
-                <tr className="font-semibold">
-                  <td className="pt-3">Total</td>
-                  <td className="pt-3 text-right">{inr(taxRows.reduce((s, r) => s + r.base, 0))}</td>
-                  <td className="pt-3 text-right">{inr(taxRows.reduce((s, r) => s + r.sgst, 0))}</td>
-                  <td className="pt-3 text-right">{inr(taxRows.reduce((s, r) => s + r.cgst, 0))}</td>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr className="font-semibold">
+                <td className="pt-3" colSpan={2}>
+                  Total tax
+                </td>
+                <td className="pt-3 text-right">{inr(taxTotals.cgst + taxTotals.sgst)}</td>
+              </tr>
+            </tfoot>
+          </table>
+
+          <dl className="mt-4 space-y-2 rounded-xl bg-[var(--lv-wash)] p-3 text-[13px]">
+            {[
+              ["Customer GST Registered/Unregistered", data.tax.customerGst],
+              ["Place of supply", data.tax.placeOfSupply],
+              ["Whether the tax is payable on Reverse Charge Basis", data.tax.reverseCharge],
+            ].map(([k, v]) => (
+              <div key={k} className="flex items-baseline justify-between gap-4">
+                <dt className="text-[var(--lv-gray)]">{k}</dt>
+                <dd className="shrink-0 font-semibold">{v}</dd>
+              </div>
+            ))}
+          </dl>
+
           <p className="mt-4 flex items-baseline justify-between rounded-2xl bg-[var(--lv-black)] px-4 py-3 text-white">
             <span className={`${display.className} text-lg font-semibold`}>Net total</span>
             <span className={`${display.className} text-2xl font-bold`}>₹{inr(data.netTotal)}</span>
