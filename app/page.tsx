@@ -120,7 +120,8 @@ export interface LevisReceiptProps {
 
 type IconName =
   | "history" | "mail" | "download" | "star" | "users" | "coins" | "trend"
-  | "gift" | "alert" | "phone" | "close" | "chevron" | "ticket" | "check";
+  | "gift" | "alert" | "phone" | "close" | "chevron" | "ticket" | "check"
+  | "pin" | "clock" | "hash" | "store";
 type TabId = "points" | "profile" | "coupon";
 type ModalId = "history" | "email" | "tax" | null;
 
@@ -289,6 +290,27 @@ const PATHS: Record<IconName, ReactNode> = {
     </>
   ),
   check: <path d="m5 12 5 5 9-10" />,
+  pin: (
+    <>
+      <path d="M20 10c0 6-8 12-8 12S4 16 4 10a8 8 0 0 1 16 0Z" />
+      <circle cx="12" cy="10" r="3" />
+    </>
+  ),
+  clock: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3.5 2" />
+    </>
+  ),
+  hash: <path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18" />,
+  store: (
+    <>
+      <path d="m3 9 1.5-5h15L21 9" />
+      <path d="M4 9v11h16V9" />
+      <path d="M3 9c0 1.7 1.3 3 3 3s3-1.3 3-3c0 1.7 1.3 3 3 3s3-1.3 3-3c0 1.7 1.3 3 3 3s3-1.3 3-3" />
+      <path d="M10 20v-5h4v5" />
+    </>
+  ),
 };
 
 function Icon({ name, className = "h-5 w-5", filled = false }: { name: IconName; className?: string; filled?: boolean }) {
@@ -439,7 +461,7 @@ function Spec({ label, value, accent = false }: { label: string; value: string; 
   );
 }
 
-function ItemRow({ item, open, onToggle }: { item: ReceiptItem; open: boolean; onToggle: () => void }) {
+function ItemRow({ item, index, open, onToggle }: { item: ReceiptItem; index: number; open: boolean; onToggle: () => void }) {
   const d = useMemo(() => derive(item), [item]);
   const panelId = useId();
   return (
@@ -451,6 +473,9 @@ function ItemRow({ item, open, onToggle }: { item: ReceiptItem; open: boolean; o
         aria-controls={panelId}
         className={`flex w-full items-start gap-3 rounded-lg text-left ${focusRing}`}
       >
+        <span className={`${display.className} w-7 shrink-0 pt-px text-xl font-semibold leading-none tabular-nums text-[var(--lv-red)]`}>
+          {String(index + 1).padStart(2, "0")}
+        </span>
         <span className="min-w-0 flex-1">
           <span className="block text-sm font-semibold leading-snug">{item.name}</span>
           <span className="mt-1 flex gap-4 text-xs text-[var(--lv-gray)]">
@@ -471,7 +496,7 @@ function ItemRow({ item, open, onToggle }: { item: ReceiptItem; open: boolean; o
       </button>
 
       <Collapse open={open} id={panelId}>
-        <div className="mt-3 border-l-2 border-[var(--lv-red)] pl-3">
+        <div className="ml-10 mt-3 border-l-2 border-[var(--lv-red)] pl-3">
           <div className="flex flex-wrap gap-1.5">
             <Spec label="Item code" value={item.code} />
             <Spec label="HSN" value={item.hsn} />
@@ -614,7 +639,7 @@ function FeedbackCard({
                   className={`rounded-full border px-3 py-1.5 text-[13px] font-medium transition-colors motion-reduce:transition-none ${focusRing} ${
                     on
                       ? "border-[var(--lv-red)] bg-[var(--lv-red)] text-white"
-                      : "border-[var(--lv-line)] bg-white hover:border-[var(--lv-black)]"
+                      : "border-[var(--lv-line)] bg-white hover:border-[var(--lv-red)] hover:text-[var(--lv-red)]"
                   }`}
                 >
                   {label}
@@ -837,7 +862,7 @@ export default function LevisReceiptV1({
     return [...by.values()].sort((a, b) => a.rate - b.rate);
   }, [data.items]);
 
-  const roundBtn = `grid h-10 w-10 place-items-center rounded-full border border-[var(--lv-line)] transition-colors hover:border-[var(--lv-black)] motion-reduce:transition-none ${focusRing}`;
+  const roundBtn = `grid h-10 w-10 place-items-center rounded-full border border-[var(--lv-line)] transition-colors hover:border-[var(--lv-red)] hover:text-[var(--lv-red)] motion-reduce:transition-none ${focusRing}`;
   const heroRow = "flex items-baseline justify-between gap-4";
 
   return (
@@ -898,54 +923,86 @@ export default function LevisReceiptV1({
 
         <div className="space-y-6 px-4 pt-6">
           {/* ---------- Store ---------- */}
-          <section aria-label="Store">
-            <h2 className={`${display.className} text-2xl font-semibold leading-tight`}>{store.name}</h2>
-            <p className="mt-1 text-sm font-medium">{store.branch}</p>
-            <p className="mt-0.5 text-sm leading-snug text-[var(--lv-gray)]">{store.address}</p>
-            <dl className="mt-4 grid grid-cols-3 divide-x divide-[var(--lv-line)] border-y border-[var(--lv-line)] py-3 text-center">
-              {[
-                ["Store code", store.code],
-                ["Phone no.", store.phone],
-                ["Store timing", store.timing],
-              ].map(([k, v]) => (
-                <div key={k} className="px-2">
-                  <dt className="text-xs text-[var(--lv-gray)]">{k}</dt>
-                  <dd className="mt-0.5 text-[13px] font-semibold leading-tight tabular-nums">{v}</dd>
-                </div>
-              ))}
+          <section aria-label="Store" className="rounded-2xl border border-[var(--lv-line)] p-4">
+            <div className="flex items-center gap-3">
+              <span className="grid h-12 w-12 shrink-0 place-items-center rounded-xl bg-[var(--lv-red)] text-white">
+                <Icon name="store" className="h-6 w-6" />
+              </span>
+              <div className="min-w-0">
+                <h2 className={`${display.className} text-2xl font-semibold leading-tight`}>{store.name}</h2>
+                <p className="text-sm font-semibold">{store.branch}</p>
+              </div>
+            </div>
+
+            <p className="mt-4 flex items-start gap-2 text-sm leading-snug text-[var(--lv-gray)]">
+              <Icon name="pin" className="mt-0.5 h-4 w-4 shrink-0 text-[var(--lv-red)]" />
+              {store.address}
+            </p>
+
+            <dl className="mt-4 grid grid-cols-2 gap-2">
+              <div className="rounded-xl bg-[var(--lv-wash)] p-3">
+                <dt className="flex items-center gap-1.5 text-xs text-[var(--lv-gray)]">
+                  <Icon name="hash" className="h-3.5 w-3.5 text-[var(--lv-red)]" />
+                  Store code
+                </dt>
+                <dd className="mt-1 text-sm font-semibold tabular-nums">{store.code}</dd>
+              </div>
+              <div className="rounded-xl bg-[var(--lv-wash)] p-3">
+                <dt className="flex items-center gap-1.5 text-xs text-[var(--lv-gray)]">
+                  <Icon name="phone" className="h-3.5 w-3.5 text-[var(--lv-red)]" />
+                  Phone no.
+                </dt>
+                <dd className="mt-1 text-sm font-semibold tabular-nums">
+                  <a href={`tel:${store.phone}`} className={`rounded hover:text-[var(--lv-red)] ${focusRing}`}>
+                    {store.phone}
+                  </a>
+                </dd>
+              </div>
+              <div className="col-span-2 rounded-xl bg-[var(--lv-wash)] p-3">
+                <dt className="flex items-center gap-1.5 text-xs text-[var(--lv-gray)]">
+                  <Icon name="clock" className="h-3.5 w-3.5 text-[var(--lv-red)]" />
+                  Store timing
+                </dt>
+                <dd className="mt-1 text-sm font-semibold">{store.timing}</dd>
+              </div>
             </dl>
-            <p className="mt-3 text-xs text-[var(--lv-gray)]">
-              Legal name: <span className="font-medium text-[var(--lv-black)]">{store.legalName}</span>
+
+            <p className="mt-4 border-t border-dashed border-[var(--lv-line)] pt-3 text-xs text-[var(--lv-gray)]">
+              Legal name: <span className="font-semibold text-[var(--lv-black)]">{store.legalName}</span>
             </p>
           </section>
 
-          {/* ---------- Items + totals ---------- */}
-          <section aria-label="Items purchased">
-            <ul className="divide-y divide-[var(--lv-line)] border-t border-[var(--lv-black)]">
+          {/* ---------- Items + totals: one bill card ---------- */}
+          <section aria-label="Items purchased" className="overflow-hidden rounded-2xl border border-[var(--lv-line)]">
+            <div className="h-1 bg-[var(--lv-red)]" />
+            <div className="flex items-baseline justify-between px-4 pb-1 pt-3">
+              <h2 className={`${display.className} text-xl font-semibold`}>Items</h2>
+              <p className="text-xs text-[var(--lv-gray)]">Pieces purchased: {data.pieces}</p>
+            </div>
+
+            <ul className="divide-y divide-[var(--lv-line)] px-4">
               {data.items.map((item, i) => (
-                <ItemRow key={`${item.code}-${i}`} item={item} open={openItem === i} onToggle={() => setOpenItem(openItem === i ? -1 : i)} />
+                <ItemRow key={`${item.code}-${i}`} item={item} index={i} open={openItem === i} onToggle={() => setOpenItem(openItem === i ? -1 : i)} />
               ))}
             </ul>
 
-            <div className="flex items-baseline justify-between border-t border-[var(--lv-black)] pt-3 text-sm">
-              <span className="text-[var(--lv-gray)]">Sub total</span>
-              <span className="font-semibold tabular-nums">{inr(data.subTotal)}</span>
-            </div>
-
-            <div className="mt-3 flex items-center justify-between rounded-2xl bg-[var(--lv-black)] px-4 py-3.5 text-white">
-              <span className={`${display.className} text-xl font-semibold`}>Net total</span>
-              <span className={`${display.className} text-3xl font-bold tabular-nums`}>₹{inr(data.netTotal)}</span>
-            </div>
-
-            <div className="mt-3 flex items-center justify-between">
-              <p className="text-xs text-[var(--lv-gray)]">Pieces purchased: {data.pieces}</p>
+            <div className="border-t border-[var(--lv-line)] px-4 py-3">
+              <div className="flex items-baseline justify-between text-sm">
+                <span className="text-[var(--lv-gray)]">Sub total</span>
+                <span className="font-semibold tabular-nums">{inr(data.subTotal)}</span>
+              </div>
               <button
                 type="button"
                 onClick={() => setModal("tax")}
-                className={`rounded-md py-1 text-sm font-semibold text-[var(--lv-red)] underline-offset-4 hover:underline ${focusRing}`}
+                className={`mt-1 rounded-md py-1 text-sm font-semibold text-[var(--lv-red)] underline-offset-4 hover:underline ${focusRing}`}
               >
                 View tax calculation
               </button>
+            </div>
+
+            <div className="flex items-center justify-between bg-[var(--lv-black)] px-4 py-4 text-white">
+              <span className={`${display.className} text-xl font-semibold`}>Net total</span>
+              <span className={`${display.className} text-3xl font-bold tabular-nums`}>₹{inr(data.netTotal)}</span>
             </div>
           </section>
 
@@ -990,14 +1047,14 @@ export default function LevisReceiptV1({
             <div className="mt-3 grid grid-cols-2 gap-3">
               <a
                 href={`tel:${contact.tollFree.replace(/\s/g, "")}`}
-                className={`flex items-center justify-center gap-2 rounded-xl border border-[var(--lv-black)] py-3 text-sm font-semibold transition-colors hover:bg-[var(--lv-black)] hover:text-white motion-reduce:transition-none ${focusRing}`}
+                className={`flex items-center justify-center gap-2 rounded-xl border border-[var(--lv-black)] py-3 text-sm font-semibold transition-colors hover:border-[var(--lv-red)] hover:bg-[var(--lv-red)] hover:text-white motion-reduce:transition-none ${focusRing}`}
               >
                 <Icon name="phone" className="h-[18px] w-[18px]" />
                 Talk to us
               </a>
               <a
                 href={`mailto:${contact.email}`}
-                className={`flex items-center justify-center gap-2 rounded-xl border border-[var(--lv-black)] py-3 text-sm font-semibold transition-colors hover:bg-[var(--lv-black)] hover:text-white motion-reduce:transition-none ${focusRing}`}
+                className={`flex items-center justify-center gap-2 rounded-xl border border-[var(--lv-black)] py-3 text-sm font-semibold transition-colors hover:border-[var(--lv-red)] hover:bg-[var(--lv-red)] hover:text-white motion-reduce:transition-none ${focusRing}`}
               >
                 <Icon name="mail" className="h-[18px] w-[18px]" />
                 Write to us
