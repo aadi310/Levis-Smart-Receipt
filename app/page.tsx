@@ -10,12 +10,22 @@
  *
  * Colours: Levi's red, black and white only (plus neutral greys for hairlines and muted text).
  *
+ * What's in this version (ported from the "Red Tab, Light" receipt)
+ *  - Transaction history lists every receipt passed in `receipts`; tapping a row opens that
+ *    receipt in place (the whole page switches to it and scrolls back to the top).
+ *  - Download builds a standalone receipt document for the receipt on screen. It has a
+ *    "Save as PDF" button that opens the print dialog.
+ *
  * Needs (in /public/images): levis-logo.png, rdep-logo.png
  * Stack: Next.js (app router) + Tailwind. No other dependencies.
  *
  * Usage:  app/levis-receipt/page.tsx
  *   import LevisReceiptV1 from "@/components/LevisReceiptV1";
  *   export default function Page() { return <LevisReceiptV1 />; }
+ *
+ * With real data: <LevisReceiptV1 receipts={[...]} data={currentReceipt} />
+ *   `receipts` = every receipt of this customer (the history popup is built from it).
+ *   `data`     = the receipt to open first (defaults to the newest one in `receipts`).
  */
 
 import {
@@ -61,6 +71,7 @@ export interface ReceiptItem {
 export interface LevisReceipt {
   invoiceNo: string;
   receiptId: string;
+  /** "DD-MM-YYYY HH:mm:ss" — the date part is used to sort the history */
   date: string;
   cashier: string;
   store: {
@@ -102,7 +113,6 @@ export interface LevisReceipt {
     reverseCharge: string;
   };
   terms: { intro: string; list: string[]; note: string };
-  history: { invoiceNo: string; date: string; store: string; amount: number; current?: boolean }[];
 }
 
 export interface ProfileForm {
@@ -119,18 +129,24 @@ export interface FeedbackValues {
 }
 
 export interface LevisReceiptProps {
+  /** Receipt to open first. Defaults to the newest receipt in `receipts`. */
   data?: LevisReceipt;
+  /** All receipts of this customer. Drives the history popup; tapping a row opens that receipt. */
+  receipts?: LevisReceipt[];
   /** Real QR image URL (a placeholder is drawn if omitted) */
   qrSrc?: string;
   /** Real barcode image URL (a placeholder is drawn if omitted) */
   barcodeSrc?: string;
   logoSrc?: string;
   rdepLogoSrc?: string;
-  onDownloadPdf?: () => void;
-  onSendEmail?: (email: string) => void;
+  /** Overrides the built-in download. Receives the receipt currently on screen. */
+  onDownloadPdf?: (receipt: LevisReceipt) => void;
+  onSendEmail?: (email: string, receipt: LevisReceipt) => void;
   onUpdateProfile?: (values: ProfileForm) => void;
   onSubmitFeedback?: (values: FeedbackValues) => void;
   onRefer?: () => void;
+  /** Fires when a receipt is opened from the history popup */
+  onSelectReceipt?: (invoiceNo: string) => void;
 }
 
 type IconName =
@@ -203,42 +219,173 @@ function buildTax(items: ReceiptItem[]) {
   };
 }
 
+/** "24-05-2026 20:34:17" -> timestamp (date part only), used to sort the history newest first. */
+function dateValue(d: string): number {
+  const [dd, mm, yyyy] = d.split(" ")[0].split("-").map(Number);
+  return Date.UTC(yyyy, (mm || 1) - 1, dd || 1);
+}
+
+const shortStore = (branch: string): string => branch.replace(/^SSIPL\s*-\s*/i, "").replace(/-/g, " - ");
+
+/* ---------------------------- downloadable receipt ------------------------------- */
+const esc = (s: string): string =>
+  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+/** Standalone, print-ready HTML for one receipt. The "Save as PDF" button inside it opens the print dialog. */
+function buildReceiptHtml(r: LevisReceipt, logoSrc: string, rdepLogoSrc: string): string {
+  const abs = (p: string) => (/^(https?:|data:)/.test(p) ? p : `${window.location.origin}${p}`);
+  const cgst = round2(r.tax.lines.filter((l) => l.type === "CGST").reduce((a, l) => a + l.amount, 0));
+  const sgst = round2(r.tax.lines.filter((l) => l.type === "SGST").reduce((a, l) => a + l.amount, 0));
+
+  const itemRows = r.items
+    .map((item) => {
+      const d = derive(item);
+      return `<tr>
+        <td><div class="n">${esc(item.name)}</div>
+          <div class="s">Code ${esc(item.code)} &middot; HSN ${esc(item.hsn)} &middot; Size ${esc(item.size)}${item.inseam ? ` &middot; Inseam ${esc(item.inseam)}` : ""}</div></td>
+        <td class="r">${item.qty}</td>
+        <td class="r">${inr(item.mrp * item.qty)}</td>
+        <td class="r">${trim(d.discountPct)}%</td>
+        <td class="r b">${inr(item.net)}</td>
+      </tr>`;
+    })
+    .join("");
+
+  const taxRows = r.tax.lines
+    .map((l) => `<tr><td>${l.type} @ ${l.rate}%</td><td class="r">${inr(l.base)}</td><td class="r">${inr(l.amount)}</td></tr>`)
+    .join("");
+
+  const payRows = r.payments
+    .map((p) => `<div class="row"><span>${esc(p.mode)}</span><strong>${inr(p.amount)}</strong></div>`)
+    .join("");
+
+  const terms = r.terms.list.map((t) => `<li>${esc(t)}</li>`).join("");
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Levi's Receipt ${esc(r.invoiceNo)}</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+body{font-family:'Inter',Arial,sans-serif;font-size:14px;color:#2E2E2E;background:#FAF9F7;max-width:780px;margin:0 auto;padding:24px;}
+.bar{display:flex;justify-content:flex-end;margin-bottom:16px;}
+.bar button{background:#C41230;color:#fff;border:0;border-radius:8px;padding:10px 18px;font:600 13px 'Inter',Arial,sans-serif;cursor:pointer;}
+.head{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;padding-bottom:16px;border-bottom:4px solid #C41230;margin-bottom:20px;}
+.head img{height:48px;width:auto;}
+.head h1{font-size:26px;color:#C41230;text-transform:uppercase;letter-spacing:.5px;margin-top:10px;}
+.meta{text-align:right;font-size:12px;line-height:1.7;}
+.store{background:#F0EEEB;border-left:4px solid #2E2E2E;padding:12px 14px;margin-bottom:20px;font-size:12px;line-height:1.6;color:#666666;}
+.store h2{font-size:15px;color:#2E2E2E;}
+.cust{margin-bottom:18px;font-size:13px;}
+table{width:100%;border-collapse:collapse;}
+.items th{background:#2E2E2E;color:#fff;text-align:left;padding:9px 8px;font-size:11px;text-transform:uppercase;letter-spacing:.5px;}
+.items td{padding:11px 8px;border-bottom:1px solid #E2DED9;vertical-align:top;font-size:12px;}
+.r{text-align:right;} .b{font-weight:700;}
+.items th.r{text-align:right;}
+.n{font-weight:600;text-transform:uppercase;} .s{font-size:11px;color:#666666;margin-top:3px;}
+.cols{display:flex;gap:28px;margin-top:22px;align-items:flex-start;}
+.col{flex:1;}
+.col h3{font-size:12px;text-transform:uppercase;letter-spacing:.6px;border-bottom:2px solid #2E2E2E;padding-bottom:6px;margin-bottom:8px;}
+.row{display:flex;justify-content:space-between;padding:4px 0;font-size:13px;}
+.tax th{text-align:left;font-size:11px;color:#666666;padding:4px 0;border-bottom:1px solid #E2DED9;}
+.tax th.r{text-align:right;} .tax td{padding:5px 0;font-size:12px;}
+.net{display:flex;justify-content:space-between;align-items:center;margin-top:12px;padding:12px 14px;background:#C41230;color:#fff;}
+.net span{font-size:14px;text-transform:uppercase;letter-spacing:.6px;font-weight:600;} .net strong{font-size:24px;}
+.pts{margin-top:18px;font-size:12px;color:#666666;}
+.terms{margin-top:26px;padding-top:14px;border-top:1px dashed #E2DED9;font-size:10px;color:#666666;line-height:1.6;}
+.terms ol{padding-left:16px;margin:6px 0;}
+.foot{margin-top:24px;padding-top:16px;border-top:1px dashed #E2DED9;text-align:center;font-size:12px;color:#666666;}
+.foot img{height:20px;width:auto;vertical-align:middle;margin-left:6px;}
+@media print{.bar{display:none;} body{-webkit-print-color-adjust:exact;print-color-adjust:exact;max-width:none;padding:0;}}
+</style>
+</head>
+<body>
+
+<div class="head">
+  <div>
+    <img src="${esc(abs(logoSrc))}" alt="Levi's" onerror="this.style.display='none'">
+    <h1>Tax invoice</h1>
+  </div>
+  <div class="meta">
+    <div><strong>Invoice no:</strong> ${esc(r.invoiceNo)}</div>
+    <div><strong>Receipt ID:</strong> ${esc(r.receiptId)}</div>
+    <div><strong>Date:</strong> ${esc(r.date)}</div>
+    <div><strong>Cashier:</strong> ${esc(r.cashier)}</div>
+  </div>
+</div>
+
+<div class="store">
+  <h2>${esc(r.store.name)} &ndash; ${esc(r.store.branch)}</h2>
+  <div>${esc(r.store.address)}</div>
+  <div>Store code ${esc(r.store.code)} &middot; Phone ${esc(r.store.phone)} &middot; ${esc(r.store.timing)}</div>
+  <div>${esc(r.store.legalName)}</div>
+</div>
+
+<div class="cust"><strong>Customer:</strong> ${esc(r.customer.firstName)} &middot; ${esc(r.customer.mobile)}</div>
+
+<table class="items">
+  <thead><tr><th style="width:46%">Item</th><th class="r">Qty</th><th class="r">MRP</th><th class="r">Disc.</th><th class="r">Net amount</th></tr></thead>
+  <tbody>${itemRows}</tbody>
+</table>
+
+<div class="cols">
+  <div class="col">
+    <h3>Tax calculation</h3>
+    <table class="tax">
+      <thead><tr><th>Tax</th><th class="r">Base amount</th><th class="r">Tax amount</th></tr></thead>
+      <tbody>${taxRows}</tbody>
+    </table>
+    <div class="pts">Customer GST: ${esc(r.tax.customerGst)} &middot; Place of supply: ${esc(r.tax.placeOfSupply)} &middot; Reverse charge: ${esc(r.tax.reverseCharge)}</div>
+  </div>
+  <div class="col">
+    <h3>Summary</h3>
+    <div class="row"><span>Sub total</span><strong>${inr(r.subTotal)}</strong></div>
+    <div class="row"><span>CGST</span><strong>+ ${inr(cgst)}</strong></div>
+    <div class="row"><span>SGST</span><strong>+ ${inr(sgst)}</strong></div>
+    <div class="net"><span>Net total</span><strong>&#8377;${inr(r.netTotal)}</strong></div>
+    <div class="row" style="margin-top:8px"><span>Pieces purchased</span><strong>${r.pieces}</strong></div>
+    <h3 style="margin-top:16px">Payment</h3>
+    ${payRows}
+  </div>
+</div>
+
+<div class="pts">RedTab points &mdash; earned: ${r.points.earned} &middot; redeemed: ${r.points.redeemed} &middot; available: ${r.points.available}</div>
+
+<div class="terms">
+  <strong>Terms and conditions</strong>
+  <p>${esc(r.terms.intro)}</p>
+  <ol>${terms}</ol>
+  <p>Customer toll free no- ${esc(r.contact.tollFree)}, ${esc(r.contact.hours)} &middot; Email &ndash; ${esc(r.contact.email)}</p>
+  <p>${esc(r.terms.note)}</p>
+</div>
+
+<div class="foot">Thank you for shopping at Levi's!<br><br>Powered by <img src="${esc(abs(rdepLogoSrc))}" alt="rdep" onerror="this.style.display='none'"></div>
+</body>
+</html>`;
+}
+
+function downloadReceipt(r: LevisReceipt, logoSrc: string, rdepLogoSrc: string) {
+  const blob = new Blob([buildReceiptHtml(r, logoSrc, rdepLogoSrc)], { type: "text/html" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `Levis_Receipt_${r.invoiceNo}.html`;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
 /* ----------------------------------------------------------------------------------
- * Sample data (shape mirrors the current receipt). Item 1 is the real line from the
- * current receipt; item codes / HSN / sizes for items 2–3 are SAMPLE values.
+ * Sample data (shape mirrors the current receipt). Receipt 7019 is the real one; the other
+ * two receipts (and the codes / HSN / sizes of the extra items) are SAMPLE values for the
+ * history popup. Replace with the real API response.
  * -------------------------------------------------------------------------------- */
-const ITEMS: ReceiptItem[] = [
-  { name: "BLR_MT_STANDARD FIT TEE SP VARSITY BRAND", qty: 1, mrp: 2199, net: 1889.97, code: "A797302560M", hsn: "61091000", size: "M" },
-  { name: "BLR MB 511 SLIM ALOKI", qty: 1, mrp: 3789, net: 3256.52, code: "A112340071", hsn: "62034200", size: "32", inseam: "32" },
-  { name: "BNG MT CL1PKT_TRIM SHRT L/S CLASSIC REGU", qty: 1, mrp: 3299, net: 2835.38, code: "A558120044", hsn: "62052000", size: "L" },
-];
-
-const SAMPLE_TAX = buildTax(ITEMS);
-
-export const sampleLevisReceipt: LevisReceipt = {
-  invoiceNo: "7019",
-  receiptId: "202605244369017019",
-  date: "24-05-2026 20:34:17",
-  cashier: "475117",
-  store: {
-    name: "Levi's Exclusive Store",
-    branch: "SSIPL - Durgapur-Junction Mall",
-    address: "Levi's Store, UGF-12, Junction Mall, City Center, Durgapur, West Bengal",
-    code: "0020043690",
-    phone: "03432544257",
-    timing: "10:00 AM to 10:00 PM",
-    legalName: "SSIPL LIFESTYLE PRIVATE LIMITED",
-  },
+const SAMPLE_COMMON = {
   customer: { firstName: "Rashid", mobile: "9993587328" },
-  items: ITEMS,
-  subTotal: SAMPLE_TAX.subTotal,
-  netTotal: round2(ITEMS.reduce((s, i) => s + i.net, 0)),
-  pieces: ITEMS.reduce((s, i) => s + i.qty, 0),
-  payments: [
-    { mode: "CASH", amount: 1981.87 },
-    { mode: "QCLVR", amount: 6000 },
-  ],
-  points: { available: 1951, earned: 917, redeemed: 0, expiring: { points: 1034, on: "12 Jan 2027" } },
   rewards: { feedback: 50, refer: 100, profile: 50 },
   contact: {
     tollFree: "1800 1020 501",
@@ -248,12 +395,6 @@ export const sampleLevisReceipt: LevisReceipt = {
     writeTo: "sagar.p@proenx.com",
   },
   referral: { code: "LEV12WU0SE", signupUrl: "https://levisredtabmemberin.erlpaas.com/" },
-  tax: {
-    lines: SAMPLE_TAX.lines,
-    customerGst: "Unregistered",
-    placeOfSupply: "West Bengal",
-    reverseCharge: "No",
-  },
   terms: {
     intro:
       "We hope you love your Levi's® product. In case you are not satisfied, you may present the sale invoice and exchange the product within 14 days from the date of purchase*. Subject to the terms and conditions listed below, products can only be exchanged and under no circumstances can any amount be refunded.",
@@ -271,13 +412,107 @@ export const sampleLevisReceipt: LevisReceipt = {
     ],
     note: "Note: Any disputes will be subject to the exclusive jurisdictions of the courts in Bangalore, Karnataka.",
   },
-  // SAMPLE rows for the transaction history popup — replace with the real API response
-  history: [
-    { invoiceNo: "7019", date: "24-05-2026", store: "Durgapur - Junction Mall", amount: 7981.87, current: true },
-    { invoiceNo: "6488", date: "11-02-2026", store: "Durgapur - Junction Mall", amount: 4299 },
-    { invoiceNo: "5921", date: "29-12-2025", store: "Kolkata - Quest Mall", amount: 7897 },
-  ],
 };
+
+const STORE_DURGAPUR: LevisReceipt["store"] = {
+  name: "Levi's Exclusive Store",
+  branch: "SSIPL - Durgapur-Junction Mall",
+  address: "Levi's Store, UGF-12, Junction Mall, City Center, Durgapur, West Bengal",
+  code: "0020043690",
+  phone: "03432544257",
+  timing: "10:00 AM to 10:00 PM",
+  legalName: "SSIPL LIFESTYLE PRIVATE LIMITED",
+};
+
+// SAMPLE store details
+const STORE_KOLKATA: LevisReceipt["store"] = {
+  name: "Levi's Exclusive Store",
+  branch: "SSIPL - Kolkata-Quest Mall",
+  address: "Levi's Store, Quest Mall, Syed Amir Ali Avenue, Park Circus, Kolkata, West Bengal",
+  code: "0020043721",
+  phone: "03322878800",
+  timing: "11:00 AM to 10:00 PM",
+  legalName: "SSIPL LIFESTYLE PRIVATE LIMITED",
+};
+
+function makeReceipt(o: {
+  invoiceNo: string;
+  receiptId: string;
+  date: string;
+  cashier: string;
+  store: LevisReceipt["store"];
+  items: ReceiptItem[];
+  payments: LevisReceipt["payments"];
+  points: LevisReceipt["points"];
+}): LevisReceipt {
+  const tax = buildTax(o.items);
+  return {
+    ...SAMPLE_COMMON,
+    invoiceNo: o.invoiceNo,
+    receiptId: o.receiptId,
+    date: o.date,
+    cashier: o.cashier,
+    store: o.store,
+    items: o.items,
+    subTotal: tax.subTotal,
+    netTotal: round2(o.items.reduce((s, i) => s + i.net, 0)),
+    pieces: o.items.reduce((s, i) => s + i.qty, 0),
+    payments: o.payments,
+    points: o.points,
+    tax: { lines: tax.lines, customerGst: "Unregistered", placeOfSupply: "West Bengal", reverseCharge: "No" },
+  };
+}
+
+export const sampleLevisReceipts: LevisReceipt[] = [
+  makeReceipt({
+    invoiceNo: "7019",
+    receiptId: "202605244369017019",
+    date: "24-05-2026 20:34:17",
+    cashier: "475117",
+    store: STORE_DURGAPUR,
+    items: [
+      { name: "BLR_MT_STANDARD FIT TEE SP VARSITY BRAND", qty: 1, mrp: 2199, net: 1889.97, code: "A797302560M", hsn: "61091000", size: "M" },
+      { name: "BLR MB 511 SLIM ALOKI", qty: 1, mrp: 3789, net: 3256.52, code: "A112340071", hsn: "62034200", size: "32", inseam: "32" },
+      { name: "BNG MT CL1PKT_TRIM SHRT L/S CLASSIC REGU", qty: 1, mrp: 3299, net: 2835.38, code: "A558120044", hsn: "62052000", size: "L" },
+    ],
+    payments: [
+      { mode: "CASH", amount: 1981.87 },
+      { mode: "QCLVR", amount: 6000 },
+    ],
+    points: { available: 1951, earned: 917, redeemed: 0, expiring: { points: 1034, on: "12 Jan 2027" } },
+  }),
+  makeReceipt({
+    invoiceNo: "6488",
+    receiptId: "202602114369016488",
+    date: "11-02-2026 18:12:45",
+    cashier: "475102",
+    store: STORE_DURGAPUR,
+    items: [
+      { name: "BLR MB 512 SLIM TAPER ARMANI", qty: 1, mrp: 4999, net: 4299, code: "A346780012", hsn: "62034200", size: "32", inseam: "32" },
+    ],
+    payments: [{ mode: "QCLVR", amount: 4299 }],
+    points: { available: 1034, earned: 430, redeemed: 0, expiring: { points: 604, on: "30 Nov 2026" } },
+  }),
+  makeReceipt({
+    invoiceNo: "5921",
+    receiptId: "202512294372015921",
+    date: "29-12-2025 16:05:09",
+    cashier: "475231",
+    store: STORE_KOLKATA,
+    items: [
+      { name: "BLR MT SLIM FIT TEE CORE LOGO", qty: 1, mrp: 2299, net: 1899, code: "A203450087", hsn: "61091000", size: "L" },
+      { name: "BLR MJ TRUCKER JACKET RINSE", qty: 1, mrp: 6999, net: 5998, code: "A671120931", hsn: "62019300", size: "M" },
+    ],
+    payments: [
+      { mode: "CASH", amount: 1897 },
+      { mode: "QCLVR", amount: 6000 },
+    ],
+    points: { available: 604, earned: 790, redeemed: 0, expiring: { points: 604, on: "05 Dec 2026" } },
+  }),
+];
+
+/** Kept for backwards compatibility: the newest sample receipt. */
+export const sampleLevisReceipt: LevisReceipt = sampleLevisReceipts[0];
 
 /* -------------------------------- icons ------------------------------------------ */
 const PATHS: Record<IconName, ReactNode> = {
@@ -886,19 +1121,27 @@ function RedTabSection({
   );
 }
 
-/* --------------------------------- main ------------------------------------------ */
-export default function LevisReceiptV1({
-  data = sampleLevisReceipt,
+/* ------------------------------ receipt view ------------------------------------- */
+interface ReceiptViewProps extends Omit<LevisReceiptProps, "data" | "receipts" | "onSelectReceipt"> {
+  data: LevisReceipt;
+  history: { invoiceNo: string; date: string; store: string; amount: number; current: boolean }[];
+  onSelect: (invoiceNo: string) => void;
+}
+
+function ReceiptView({
+  data,
+  history,
+  onSelect,
   qrSrc,
   barcodeSrc,
   logoSrc = "/images/levis-logo.png",
   rdepLogoSrc = "/images/rdep-logo.png",
-  onDownloadPdf = () => window.print(),
+  onDownloadPdf,
   onSendEmail,
   onUpdateProfile,
   onSubmitFeedback,
   onRefer,
-}: LevisReceiptProps) {
+}: ReceiptViewProps) {
   const [openItem, setOpenItem] = useState(-1);
   const [modal, setModal] = useState<ModalId>(null);
   const [termsOpen, setTermsOpen] = useState(false);
@@ -915,6 +1158,8 @@ export default function LevisReceiptV1({
       round2(data.tax.lines.filter((l) => l.type === t).reduce((acc, l) => acc + l.amount, 0));
     return { cgst: sum("CGST"), sgst: sum("SGST") };
   }, [data.tax.lines]);
+
+  const handleDownload = () => (onDownloadPdf ? onDownloadPdf(data) : downloadReceipt(data, logoSrc, rdepLogoSrc));
 
   return (
     <div style={theme} className={`${body.className} min-h-screen bg-[var(--lv-wash)] text-[var(--lv-black)] sm:py-8`}>
@@ -1063,7 +1308,7 @@ export default function LevisReceiptV1({
               [
                 { icon: "history", label: "Transaction history", onClick: () => setModal("history") },
                 { icon: "mail", label: "Email receipt", onClick: () => setModal("email") },
-                { icon: "download", label: "Download PDF", onClick: onDownloadPdf },
+                { icon: "download", label: "Download PDF", onClick: handleDownload },
               ] as { icon: IconName; label: string; onClick: () => void }[]
             ).map((a) => (
               <button
@@ -1176,18 +1421,33 @@ export default function LevisReceiptV1({
       {modal === "history" && (
         <Modal title="Transaction history" onClose={closeModal}>
           <ul className="divide-y divide-[var(--lv-line)]">
-            {data.history.map((h) => (
-              <li key={h.invoiceNo} className="flex items-center justify-between gap-3 py-3">
-                <div className="min-w-0">
-                  <p className="text-sm font-semibold">Invoice no: {h.invoiceNo}</p>
-                  <p className="text-xs text-[var(--lv-gray)]">
-                    {h.date}, {h.store}
-                  </p>
-                </div>
-                <div className="shrink-0 text-right">
-                  <p className="text-sm font-semibold tabular-nums">₹{inr(h.amount)}</p>
-                  {h.current && <p className="text-xs font-semibold text-[var(--lv-red)]">This receipt</p>}
-                </div>
+            {history.map((h) => (
+              <li key={h.invoiceNo}>
+                <button
+                  type="button"
+                  disabled={h.current}
+                  onClick={() => {
+                    closeModal();
+                    onSelect(h.invoiceNo);
+                  }}
+                  className={`flex w-full items-center justify-between gap-3 rounded py-3 text-left transition-colors motion-reduce:transition-none ${focusRing} ${
+                    h.current ? "cursor-default" : "hover:bg-[var(--lv-wash)]"
+                  }`}
+                >
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold">Invoice no: {h.invoiceNo}</p>
+                    <p className="text-xs text-[var(--lv-gray)]">
+                      {h.date}, {h.store}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <div className="text-right">
+                      <p className="text-sm font-semibold tabular-nums">₹{inr(h.amount)}</p>
+                      {h.current && <p className="text-xs font-semibold text-[var(--lv-red)]">This receipt</p>}
+                    </div>
+                    {!h.current && <Icon name="chevron" className="h-4 w-4 -rotate-90 text-[var(--lv-red)]" />}
+                  </div>
+                </button>
               </li>
             ))}
           </ul>
@@ -1200,7 +1460,7 @@ export default function LevisReceiptV1({
             className="space-y-3"
             onSubmit={(e) => {
               e.preventDefault();
-              onSendEmail?.(email);
+              onSendEmail?.(email, data);
               setSentTo(email);
             }}
           >
@@ -1284,4 +1544,41 @@ export default function LevisReceiptV1({
       )}
     </div>
   );
+}
+
+/* --------------------------------- main ------------------------------------------ */
+/** Holds which receipt is open. Each receipt is a keyed ReceiptView, so switching resets the
+ *  open item, popups, tabs and forms instead of carrying them over from the previous receipt. */
+export default function LevisReceiptV1({ data, receipts, onSelectReceipt, ...rest }: LevisReceiptProps) {
+  const list = useMemo(() => {
+    const base = receipts ?? (data ? [data] : sampleLevisReceipts);
+    const merged = data && !base.some((r) => r.invoiceNo === data.invoiceNo) ? [data, ...base] : base;
+    return [...merged].sort((a, b) => dateValue(b.date) - dateValue(a.date));
+  }, [data, receipts]);
+
+  const [currentId, setCurrentId] = useState(data?.invoiceNo ?? list[0].invoiceNo);
+  const current = list.find((r) => r.invoiceNo === currentId) ?? list[0];
+
+  const history = useMemo(
+    () =>
+      list.map((r) => ({
+        invoiceNo: r.invoiceNo,
+        date: r.date.split(" ")[0],
+        store: shortStore(r.store.branch),
+        amount: r.netTotal,
+        current: r.invoiceNo === current.invoiceNo,
+      })),
+    [list, current.invoiceNo],
+  );
+
+  const select = useCallback(
+    (invoiceNo: string) => {
+      setCurrentId(invoiceNo);
+      onSelectReceipt?.(invoiceNo);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    },
+    [onSelectReceipt],
+  );
+
+  return <ReceiptView key={current.invoiceNo} data={current} history={history} onSelect={select} {...rest} />;
 }
