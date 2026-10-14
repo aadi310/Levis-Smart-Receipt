@@ -229,7 +229,7 @@ export const sampleLevisReceipt: LevisReceipt = {
     timing: "10:00 AM to 10:00 PM",
     legalName: "SSIPL LIFESTYLE PRIVATE LIMITED",
   },
-  customer: { firstName: "Rashad", mobile: "7250230751" },
+  customer: { firstName: "Rashid", mobile: "9993587328" },
   items: ITEMS,
   subTotal: SAMPLE_TAX.subTotal,
   netTotal: round2(ITEMS.reduce((s, i) => s + i.net, 0)),
